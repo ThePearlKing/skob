@@ -13,6 +13,14 @@ pub const CELL_W: i32 = 2;
 pub const CELL_H: i32 = 4;
 
 const SOLVER_PASSES: usize = 6;
+/// How much of the sideways slip between two touching skins is taken out of
+/// them each time they are pushed apart.  It is what turns sliding into
+/// turning: at zero everything skates over everything else, perfectly square.
+const SKIN_GRIP: f64 = 0.45;
+/// How fast a thing with a wall inside it works its way off it, in field
+/// pixels a frame.  Brisk enough to be out within a breath, slow enough that
+/// it looks like getting unstuck rather than being fired out of a cannon.
+const WALL_EJECT: f64 = 1.5;
 /// Samples taken along each span of skin, so a letter cannot slip between two
 /// points of the ring without touching either of them.
 const SKIN_SAMPLES: usize = 3;
@@ -402,10 +410,13 @@ impl World {
             }
             let up = lift.get(&self.bodies[i].id).copied().unwrap_or(0.0);
             self.integrate(i, up, wet[i]);
+            self.sweep_solid(i);
             self.solve(i);
         }
         self.tighten_strings();
         self.separate();
+        self.bump_walls();
+        self.cough_up_walls();
         self.sandbox();
     }
 
@@ -1081,16 +1092,281 @@ impl World {
                 let push = (want - d) / d * 0.5;
                 let wa = self.bodies[b].rest / (self.bodies[a].rest + self.bodies[b].rest);
                 let wb = 1.0 - wa;
-                for i in 0..self.bodies[a].x.len() {
-                    self.bodies[a].x[i] -= dx * push * wa;
-                    self.bodies[a].y[i] -= dy * push * wa;
+                let (ux, uy) = (dx / d, dy / d);
+                self.shove(a, -dx * push * wa, -dy * push * wa, (ux, uy));
+                self.shove(b, dx * push * wb, dy * push * wb, (-ux, -uy));
+                self.rub(a, b, (ux, uy), wa, wb);
+            }
+        }
+    }
+
+    /// Move a body out of another one's way -- but not all of it equally.
+    ///
+    /// The side that is actually touching takes most of the push and the far
+    /// side takes hardly any, which is the difference between a shove and a
+    /// turn: a box that lands on a skob with one corner is now pushed at that
+    /// corner, and goes over the way a box would, instead of sliding off it
+    /// still perfectly square.  `facing` points from this body towards the
+    /// other one.
+    fn shove(&mut self, bi: usize, dx: f64, dy: f64, facing: (f64, f64)) {
+        let (cx, cy) = self.bodies[bi].centre();
+        let reach = self.bodies[bi].rest.max(1.0);
+        let skin = self.bodies[bi].spec.points;
+        let b = &mut self.bodies[bi];
+        let mut share = vec![1.0; b.x.len()];
+        let mut total = 0.0;
+        for i in 0..skin {
+            // How far round towards the other thing this point lies: one at
+            // the contact and nothing on the far side, because that is where
+            // the two of them are touching and nowhere else.  A little is left
+            // for the far side so the body is moved rather than pulled apart.
+            let lean = ((b.x[i] - cx) * facing.0 + (b.y[i] - cy) * facing.1) / reach;
+            share[i] = lean.max(0.0) + 0.12;
+            total += share[i];
+        }
+        let mean = total / skin as f64;
+        if mean < 1e-9 {
+            return;
+        }
+        for i in 0..b.x.len() {
+            // The middle is a hub, not a bit of skin: it takes the plain share
+            // so that the body goes where it is sent even as the skin turns.
+            let k = if i < skin { share[i] / mean } else { 1.0 };
+            b.x[i] += dx * k;
+            b.y[i] += dy * k;
+        }
+    }
+
+    /// Nothing may step over a wall.
+    ///
+    /// A point is only ever looked at where it is.  Anything moving faster
+    /// than a cell is wide can therefore be on one side of a block in one
+    /// frame and out the far side the next, having never once been inside it
+    /// for anybody to notice.  So before the skin is asked about anything, the
+    /// line each point has just travelled is walked, and the point is left at
+    /// the last free spot before the first solid face it would have crossed.
+    fn sweep_solid(&mut self, bi: usize) {
+        if !self.ground.any() && self.grain_cells.is_empty() {
+            return;
+        }
+        for i in 0..self.bodies[bi].x.len() {
+            let b = &self.bodies[bi];
+            let (fx, fy) = (b.ox[i], b.oy[i]);
+            let (dx, dy) = (b.x[i] - fx, b.y[i] - fy);
+            // A short step cannot jump anything; the skin sees to those.
+            let far = dx.abs().max(dy.abs());
+            if far < 1.5 {
+                continue;
+            }
+            let steps = far.ceil() as i32;
+            let mut last = (fx, fy);
+            for s in 1..=steps {
+                let u = s as f64 / steps as f64;
+                let (sx, sy) = (fx + dx * u, fy + dy * u);
+                let (row, col) = (
+                    (sy / CELL_H as f64).floor() as i32,
+                    (sx / CELL_W as f64).floor() as i32,
+                );
+                if self.blocked(row, col) {
+                    let b = &mut self.bodies[bi];
+                    b.x[i] = last.0;
+                    b.y[i] = last.1;
+                    break;
                 }
-                for i in 0..self.bodies[b].x.len() {
-                    self.bodies[b].x[i] += dx * push * wb;
-                    self.bodies[b].y[i] += dy * push * wb;
+                last = (sx, sy);
+            }
+        }
+    }
+
+    /// Running into a wall.
+    ///
+    /// A letter has a whole line of other letters beside it and stops a thing
+    /// by sheer numbers.  A block of wall stands on its own, and a point at a
+    /// time is not enough: the two points touching it are simply dragged
+    /// through by the dozen that are not.  So a block pushes on the whole body
+    /// at once, out of the nearest corner or face of itself, and takes away
+    /// whatever speed that body had towards it.
+    fn bump_walls(&mut self) {
+        let walls: Vec<(f64, f64)> = self
+            .bodies
+            .iter()
+            .filter(|b| b.spec.fixed)
+            .map(|b| (b.x[0] + CELL_W as f64 / 2.0, b.y[0] + CELL_H as f64 / 2.0))
+            .collect();
+        if walls.is_empty() {
+            return;
+        }
+        let (half_w, half_h) = (CELL_W as f64 / 2.0, CELL_H as f64 / 2.0);
+        for bi in 0..self.bodies.len() {
+            if self.bodies[bi].spec.mode != Mode::Body {
+                continue;
+            }
+            let keep = self.bounce * self.bodies[bi].spec.grip;
+            let (cx, cy) = self.bodies[bi].centre();
+            let reach = self.bodies[bi].rest * 0.92;
+            // A floor is many blocks, and being pushed out of every one of
+            // them in turn is how a thing gets fired off it.  The worst of
+            // them is the one it is really in, and settling that settles the
+            // rest: what is left over comes round again next frame.
+            let mut worst = (0.0, 0.0, 0.0);
+            for &(wx, wy) in &walls {
+                if (wx - cx).abs() > reach + half_w * 2.0 || (wy - cy).abs() > reach + half_h * 2.0 {
+                    continue;
+                }
+                // The nearest spot on the block itself to the middle of the body.
+                let nx = cx.clamp(wx - half_w, wx + half_w);
+                let ny = cy.clamp(wy - half_h, wy + half_h);
+                let (mut ox, mut oy) = (cx - nx, cy - ny);
+                let d = (ox * ox + oy * oy).sqrt();
+                if d >= reach {
+                    continue;
+                }
+                if d < 1e-6 {
+                    // Dead centre of the block: out through the top.
+                    ox = 0.0;
+                    oy = -1.0;
+                } else {
+                    ox /= d;
+                    oy /= d;
+                }
+                let out = reach - d;
+                if out > worst.2 {
+                    worst = (ox, oy, out);
+                }
+            }
+            let (ox, oy, out) = worst;
+            if out <= 0.0 {
+                continue;
+            }
+            let b = &mut self.bodies[bi];
+            for i in 0..b.x.len() {
+                b.x[i] += ox * out;
+                b.y[i] += oy * out;
+                // Whatever of its speed was aimed at the wall is gone, bar the
+                // bounce it is owed.
+                let (vx, vy) = (b.x[i] - b.ox[i], b.y[i] - b.oy[i]);
+                let into = vx * ox + vy * oy;
+                if into < 0.0 {
+                    b.ox[i] = b.x[i] - (vx - into * ox * (1.0 + keep));
+                    b.oy[i] = b.y[i] - (vy - into * oy * (1.0 + keep));
                 }
             }
         }
+    }
+
+    /// A wall that has ended up inside something.
+    ///
+    /// A body only ever feels the world with its skin, and a wall cannot move
+    /// out of the way of anything, so a block that gets past the skin -- taken
+    /// at a run, or dropped on -- would sit there inside the thing for good,
+    /// with nothing in the world able to notice.  This is what notices: any
+    /// block found in there is shown the nearest way out, and the body goes
+    /// that way until it is out.  It is moved in the past as well as the
+    /// present, so being unstuck is not the same as being launched.
+    fn cough_up_walls(&mut self) {
+        let walls: Vec<(f64, f64)> = self
+            .bodies
+            .iter()
+            .filter(|b| b.spec.fixed)
+            .map(|b| (b.x[0] + CELL_W as f64 / 2.0, b.y[0] + CELL_H as f64 / 2.0))
+            .collect();
+        if walls.is_empty() {
+            return;
+        }
+        for bi in 0..self.bodies.len() {
+            if self.bodies[bi].spec.mode != Mode::Body {
+                continue;
+            }
+            let (cx, cy) = self.bodies[bi].centre();
+            let reach = self.bodies[bi].rest * self.bodies[bi].spec.shell_max.max(1.0) + CELL_H as f64;
+            for &(wx, wy) in &walls {
+                if (wx - cx).abs() > reach || (wy - cy).abs() > reach {
+                    continue;
+                }
+                if !self.inside_skin(bi, wx, wy) {
+                    continue;
+                }
+                let (mut ox, mut oy) = (cx - wx, cy - wy);
+                let d = (ox * ox + oy * oy).sqrt();
+                if d < 1e-6 {
+                    // Dead centre: up is as good a way out as any.
+                    ox = 0.0;
+                    oy = -1.0;
+                } else {
+                    ox /= d;
+                    oy /= d;
+                }
+                let b = &mut self.bodies[bi];
+                for i in 0..b.x.len() {
+                    b.x[i] += ox * WALL_EJECT;
+                    b.y[i] += oy * WALL_EJECT;
+                    b.ox[i] += ox * WALL_EJECT;
+                    b.oy[i] += oy * WALL_EJECT;
+                }
+                break;
+            }
+        }
+    }
+
+    /// Is this spot within the ring of skin?  Counted by crossings, walked
+    /// once round.
+    fn inside_skin(&self, bi: usize, x: f64, y: f64) -> bool {
+        let b = &self.bodies[bi];
+        let n = b.spec.points;
+        let mut within = false;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let (yi, yj) = (b.y[i], b.y[j]);
+            if (yi > y) != (yj > y) && x < b.x[i] + (y - yi) / (yj - yi) * (b.x[j] - b.x[i]) {
+                within = !within;
+            }
+        }
+        within
+    }
+
+    /// Two things that are touching do not slide over one another for free.
+    ///
+    /// The bit of each that is actually in contact is slowed against the bit
+    /// of the other, sideways on -- and because that is done at that one point
+    /// rather than to the whole body, a box sliding off the top of a skob
+    /// catches on its corner and goes over, which is what a box does.  Nothing
+    /// here is allowed to speed anything up.
+    fn rub(&mut self, a: usize, b: usize, normal: (f64, f64), wa: f64, wb: f64) {
+        let (ax, ay) = self.bodies[a].centre();
+        let (bx, by) = self.bodies[b].centre();
+        let ia = match self.touching_point(a, (bx, by)) {
+            Some(i) => i,
+            None => return,
+        };
+        let ib = match self.touching_point(b, (ax, ay)) {
+            Some(i) => i,
+            None => return,
+        };
+        // Sideways to the way they are pressed together.
+        let along = (-normal.1, normal.0);
+        let slip = {
+            let (pa, pb) = (&self.bodies[a], &self.bodies[b]);
+            let va = (pa.x[ia] - pa.ox[ia], pa.y[ia] - pa.oy[ia]);
+            let vb = (pb.x[ib] - pb.ox[ib], pb.y[ib] - pb.oy[ib]);
+            (va.0 - vb.0) * along.0 + (va.1 - vb.1) * along.1
+        };
+        let bite = slip * SKIN_GRIP;
+        let pa = &mut self.bodies[a];
+        pa.x[ia] -= along.0 * bite * wa;
+        pa.y[ia] -= along.1 * bite * wa;
+        let pb = &mut self.bodies[b];
+        pb.x[ib] += along.0 * bite * wb;
+        pb.y[ib] += along.1 * bite * wb;
+    }
+
+    /// Which bit of this body's skin is nearest the thing it has run into.
+    fn touching_point(&self, bi: usize, towards: (f64, f64)) -> Option<usize> {
+        let b = &self.bodies[bi];
+        (0..b.spec.points).min_by(|&i, &j| {
+            let di = (b.x[i] - towards.0).powi(2) + (b.y[i] - towards.1).powi(2);
+            let dj = (b.x[j] - towards.0).powi(2) + (b.y[j] - towards.1).powi(2);
+            di.partial_cmp(&dj).unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     // ---------------------------------------------------------------- sand

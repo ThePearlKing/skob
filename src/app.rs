@@ -67,6 +67,11 @@ pub struct App {
     pub placing: Option<(&'static Spec, usize, Option<f64>)>,
     /// The brush that takes things away again, and how wide it is in columns.
     pub erasing: Option<f64>,
+    /// Where the brush last put something down, and how far it has to travel
+    /// before it may put down another.  Forgotten the moment you let go, so
+    /// every fresh click always places one.
+    pub brush: Option<(f64, f64)>,
+    pub brush_gap: f64,
     pub quit: bool,
     pub cols: usize,
     pub rows: usize,
@@ -86,6 +91,8 @@ impl App {
             note: String::new(),
             placing: None,
             erasing: None,
+            brush: None,
+            brush_gap: 0.0,
             quit: false,
             cols,
             rows,
@@ -137,6 +144,12 @@ impl App {
             return self.dim(self.opts.base_colour);
         }
         let c = spec.palette[self.world.rng.below(spec.palette.len())];
+        // A box is grey to begin with, and halving grey only makes coal of it.
+        // It has no eyes to make room for either, so with -w it keeps its own
+        // colour and stays a box you can see.
+        if spec.name == "box" {
+            return c;
+        }
         self.dim(c)
     }
 
@@ -228,15 +241,28 @@ impl App {
             }
             x = x.clamp(1.0, self.world.width as f64 - 2.0);
             y = y.clamp(1.0, self.world.height as f64 - 2.0);
-            // You draw with this, holding the button down, so the same spot
-            // comes round again and again: nothing goes where something is.
+            // You draw with this, holding the button down, and a held button
+            // reports itself over and over whether you move it or not.  A
+            // grain may go anywhere there is not already one; anything bigger
+            // has to wait until the brush has travelled clear of the last one
+            // it left, so a sweep lays them out side by side and holding still
+            // lays down exactly one.
             if spec.mode.is_grain() {
                 if self.world.cell_taken(x, y) {
                     continue;
                 }
                 self.world.take_cell(x, y);
-            } else if spec.buoyancy >= 0.0 && self.world.body_at(x, y).is_some() {
-                continue;
+            } else {
+                if let Some((lx, ly)) = self.brush {
+                    if ((x - lx).powi(2) + (y - ly).powi(2)).sqrt() < self.brush_gap {
+                        continue;
+                    }
+                }
+                if spec.buoyancy >= 0.0 && self.world.body_at(x, y).is_some() {
+                    continue;
+                }
+                self.brush = Some((x, y));
+                self.brush_gap = radius * 2.0;
             }
             // Put a balloon down on top of something and it is tied to it.
             let knot = if spec.buoyancy < 0.0 { self.world.body_at(px, py) } else { None };
@@ -445,7 +471,7 @@ impl App {
                     kinds::names()
                 );
             }
-            "q" | "quit" => self.quit = true,
+            "q" | "quit" | "exit" | "bye" => self.quit = true,
             other => self.note = format!("not a command: {}", other),
         }
     }

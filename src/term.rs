@@ -4,10 +4,10 @@
 //! from the shell, how to give it back, and how to put coloured cells on a
 //! screen in a single write so the picture never tears.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::os::unix::io::AsRawFd;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::Duration;
 
 pub const ESC: char = '\x1b';
@@ -49,24 +49,14 @@ extern "C" fn restore_and_exit(_signal: libc::c_int) {
 /// The terminal as we found it, so we can put it back exactly.
 pub struct Term {
     saved: Option<libc::termios>,
-    /// Keystrokes arrive here from a thread that is always blocked on stdin.
-    keys: Receiver<u8>,
+    /// Set once stdin has ended: a recording, or something piped in.
+    spent: Cell<bool>,
     pub raw: bool,
 }
 
 impl Term {
     pub fn new() -> Term {
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut byte = [0u8; 1];
-            let mut stdin = std::io::stdin();
-            while stdin.read(&mut byte).unwrap_or(0) == 1 {
-                if tx.send(byte[0]).is_err() {
-                    break;
-                }
-            }
-        });
-        Term { saved: None, keys: rx, raw: false }
+        Term { saved: None, spent: Cell::new(false), raw: false }
     }
 
     /// Cooked -> raw.  Keys reach us one at a time, unechoed, and ^C is ours.
@@ -141,19 +131,45 @@ impl Term {
 
     /// Wait up to `timeout` for one byte of input.
     ///
-    /// When stdin is not a terminal the reader has already hit end of file and
-    /// the channel is closed, which would otherwise hand back `None` the
-    /// instant it is asked and let the frame loop free-run.  Wait out the rest
-    /// of the frame by hand instead, so a recording keeps the same pace as a
-    /// person watching it.
+    /// Asked for, one byte at a time, on the same thread that draws -- never
+    /// by a reader sitting on stdin of its own accord.  That matters for the
+    /// one moment we hand the terminal over: while `nvim` has it, this is not
+    /// called at all, so every key the person types is nvim's and none of them
+    /// are quietly eaten on the way past.  A reader of our own would go on
+    /// taking its share regardless, and would be finished for good the first
+    /// time that read came back empty -- which is a `skob` that cannot be
+    /// typed at and, being in raw mode, cannot be interrupted either.
+    ///
+    /// When stdin is not a terminal at all it ends immediately, which would
+    /// let the frame loop free-run; wait the frame out by hand instead, so a
+    /// recording keeps the same pace as a person watching it.
     pub fn key(&self, timeout: Duration) -> Option<u8> {
-        match self.keys.recv_timeout(timeout) {
-            Ok(byte) => Some(byte),
-            Err(RecvTimeoutError::Timeout) => None,
-            Err(RecvTimeoutError::Disconnected) => {
-                std::thread::sleep(timeout);
+        if self.spent.get() {
+            std::thread::sleep(timeout);
+            return None;
+        }
+        let mut waiting = libc::pollfd {
+            fd: libc::STDIN_FILENO,
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
+        let ready = unsafe { libc::poll(&mut waiting, 1, ms) };
+        if ready <= 0 {
+            // Nothing, or interrupted on the way: either way, no key.
+            return None;
+        }
+        let mut byte = [0u8; 1];
+        let got = unsafe {
+            libc::read(libc::STDIN_FILENO, byte.as_mut_ptr() as *mut libc::c_void, 1)
+        };
+        match got {
+            1 => Some(byte[0]),
+            0 => {
+                self.spent.set(true);
                 None
             }
+            _ => None,
         }
     }
 }

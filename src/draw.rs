@@ -147,7 +147,7 @@ impl Canvas {
         }
         let t = tick as f64 * 0.017 + body.id as f64 * 1.9;
         let (nx, ny) = (cx + r * 0.30 * t.cos(), cy + r * (0.40 + 0.10 * (t * 1.3).sin()));
-        self.innard(body, nx, ny, (r * 0.30).max(1.5), darken(body.colour));
+        self.innard(body, nx, ny, (r * 0.30).max(1.5), deeper(body.colour));
         for k in 0..2 {
             let u = t * (0.8 + 0.4 * k as f64) + k as f64 * 2.3;
             let vx = cx + r * 0.46 * u.cos();
@@ -238,16 +238,40 @@ fn inside(body: &crate::world::Body, x: f64, y: f64) -> bool {
     within
 }
 
-/// And the same colour a few steps deeper, for whatever is meant to read as
-/// being under the surface rather than on it.
-pub fn darken(c: u8) -> u8 {
+/// How much light there is in a colour at all, on a scale of nothing to
+/// fifteen.  Only used to find out whether there is any room left below.
+fn light_level(c: u8) -> u8 {
+    match c {
+        16..=231 => (c - 16) / 36 + ((c - 16) % 36) / 6 + (c - 16) % 6,
+        232..=255 => ((c as u16 - 232) * 15 / 23) as u8,
+        0..=7 => 4,
+        _ => 12,
+    }
+}
+
+/// The shade the innards are drawn in: as far under the skin as there is room
+/// for.  Two steps if the skin can spare them, one if it cannot -- and only if
+/// even one step would leave nothing but black, as `-w` very nearly does, does
+/// it go over the skin instead.  A nucleus should always read as a nucleus and
+/// never as a hole punched in the thing.
+fn deeper(c: u8) -> u8 {
+    for step in [2, 1] {
+        let under = darker_by(c, step);
+        if light_level(under) > 1 {
+            return under;
+        }
+    }
+    lighten(c)
+}
+
+/// The same colour, this many steps down each channel.
+fn darker_by(c: u8, step: u8) -> u8 {
     match c {
         16..=231 => {
             let (r, g, b) = ((c - 16) / 36, ((c - 16) % 36) / 6, (c - 16) % 6);
-            16 + r.saturating_sub(2) * 36 + g.saturating_sub(2) * 6 + b.saturating_sub(2)
+            16 + r.saturating_sub(step) * 36 + g.saturating_sub(step) * 6 + b.saturating_sub(step)
         }
-        232..=237 => 232,
-        238..=255 => c - 6,
+        232..=255 => c.saturating_sub(3 * step).max(232),
         8..=15 => c - 8,
         _ => c,
     }

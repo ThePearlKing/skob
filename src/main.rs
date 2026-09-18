@@ -74,7 +74,7 @@ pub const USAGE: &str = "\
    :stop                stop placing or erasing
    :clear :reset        banish everything · back to one skob
    :gravity <x>  :stiffness <x>  :bounce <x>  :colour <n>  :random  :pause
-   :q  :quit            leave
+   :q  :quit  :exit     leave
    a ; b ; c            several at once, in the order written:
                         :clear ; summon amoeba 3 ; gravity 0.1
 
@@ -359,6 +359,9 @@ fn handle_mouse(app: &mut App, (button, col, row, pressed): (u32, i32, i32, bool
         }
     } else if !pressed {
         app.world.grab = None;
+        // Let go and the brush forgets where it was, so the next click always
+        // puts one down wherever you clicked.
+        app.brush = None;
     }
 }
 
@@ -387,6 +390,10 @@ fn finish_shell_action(app: &mut App, term: &mut Term, action: Action) {
                 sh.run_foreground(&line);
             }
             term.raw_mode();
+            // Whatever it left behind in the input queue on its way out -- a
+            // half-finished escape sequence, a mouse report -- is its own, not
+            // ours, and would be typed into the world as gibberish.
+            term.drop_pending_input();
             term.enter_screen(true);
         }
     }
