@@ -93,8 +93,8 @@ line, vim style; space pauses, `g` kills gravity, `s` and `h` soften and harden,
 `--shell` turns the screen into a bash shell that scrolls the way a terminal
 does.  Anything that draws its own screen -- an editor, a pager, `htop`,
 `cmatrix`, or one of the fetch tools that prints beside its own logo -- is
-handed the real terminal for as long as it runs, and the screen is held until
-you press a key so you can read what it left.  Everything else runs as a job
+handed the real terminal for as long as it runs, and you are back among the
+skobs the moment it exits.  Everything else runs as a job
 whose output is read as text: colour is kept, and anything it says that would
 have moved the cursor or taken the screen is dropped, because that would have
 been done to the shell rather than by it.  In the bottom rows (`-s`, six by default) the text itself is the ground:
