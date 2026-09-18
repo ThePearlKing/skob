@@ -47,7 +47,10 @@ pub const USAGE: &str = "\
  MOUSE  press and drag -> grab the skin of a thing and fling it
  KEYS   space pause · g gravity · b bouncier · s softer
         h harder · r reset · q quit
- ;  or  :   open the command line, vim style
+ ;  or  :   open the command line, vim style.  The colon opens the bar
+            rather than being part of the command, but writing it anyway is
+            harmless wherever skob takes one -- in --command, in a chain, and
+            typed straight at the --shell prompt.
 
  THINGS   skob        a soft ball, the original
           gorb        an orange sphere, rigid and shining, no two alike

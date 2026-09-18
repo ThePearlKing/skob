@@ -296,6 +296,12 @@ impl Shell {
         self.hist_at = self.history.len();
 
         let first = line.split_whitespace().next().unwrap_or("");
+        // `:summon sand 300` is how you would write it anywhere else in skob,
+        // and there is no program on earth whose name starts with a colon, so
+        // it means here what it means there.
+        if let Some(rest) = line.trim_start().strip_prefix(':') {
+            return Action::Creature(rest.trim().to_string());
+        }
         match first {
             "exit" | "logout" => Action::Leave,
             // Ours, not the program of the same name: its escape codes would

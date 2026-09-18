@@ -417,11 +417,16 @@ impl App {
     /// `quit`.
     pub fn run_command(&mut self, line: &str) {
         for part in line.split(';') {
-            if part.trim().is_empty() {
+            // The colon is how you open the bar to type a command, not part of
+            // the command itself -- but it is how everyone writes them down,
+            // and `--command ":summon sand 300"` should mean what it plainly
+            // means rather than looking for a verb called `:summon`.
+            let part = part.trim().trim_start_matches(':').trim_start();
+            if part.is_empty() {
                 continue;
             }
             let note = std::mem::take(&mut self.note);
-            self.run_one(part.trim());
+            self.run_one(part);
             // A command with nothing to say leaves the last thing said standing,
             // so `clear ; summon amoeba` reads as the summon it ended on.
             if self.note.is_empty() {
