@@ -2,12 +2,99 @@
 
 use crate::kinds::{self, Mode, Spec};
 use crate::shell::Shell;
-use crate::world::{World, CELL_H, CELL_W};
+use crate::world::{Rng, World, CELL_H, CELL_W};
+
+/// A number, or a spread to take one from.
+///
+/// Anywhere skob is given a number it will take one of these: `7` is seven,
+/// and `7-13` is anywhere between seven and thirteen.  A spread is rolled
+/// afresh every time it is asked for rather than once when it was read, which
+/// is the whole point of it -- `summon skob 1-4 5-13` is one roll for how many
+/// and then a roll each for how big, so no two of them come out alike.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Span {
+    pub lo: f64,
+    pub hi: f64,
+}
+
+impl Span {
+    pub const fn at(v: f64) -> Span {
+        Span { lo: v, hi: v }
+    }
+
+    /// `7`, or `7-13`.  A dash is a spread only when it lies between two
+    /// numbers: the one in front of `-3` is a minus sign, and so is the one in
+    /// the middle of `1e-3`.
+    pub fn read(word: &str) -> Option<Span> {
+        if let Ok(v) = word.parse::<f64>() {
+            return Some(Span::at(v));
+        }
+        let bytes = word.as_bytes();
+        for i in 1..bytes.len() {
+            if bytes[i] != b'-' || matches!(bytes[i - 1], b'e' | b'E') {
+                continue;
+            }
+            let (first, rest) = word.split_at(i);
+            if let (Ok(a), Ok(b)) = (first.parse::<f64>(), rest[1..].parse::<f64>()) {
+                return Some(Span { lo: a.min(b), hi: a.max(b) });
+            }
+        }
+        None
+    }
+
+    pub fn spread(&self) -> bool {
+        self.hi > self.lo
+    }
+
+    /// One number out of it.
+    pub fn roll(&self, rng: &mut Rng) -> f64 {
+        if self.spread() {
+            self.lo + rng.float() * (self.hi - self.lo)
+        } else {
+            self.lo
+        }
+    }
+
+    /// One whole number out of it, each as likely as the next -- rounding a
+    /// rolled number instead would make the two ends half as likely as the
+    /// middle, and `1-4` is meant to mean four things equally.
+    pub fn roll_whole(&self, rng: &mut Rng) -> i64 {
+        let (lo, hi) = (self.lo.round() as i64, self.hi.round() as i64);
+        if hi > lo {
+            lo + rng.below((hi - lo + 1) as usize) as i64
+        } else {
+            lo
+        }
+    }
+
+    /// For the few things that are settled once and for all before there is a
+    /// world to roll them in: the flags, read before anything exists.
+    pub fn roll_once(&self) -> f64 {
+        self.roll(&mut Rng::new())
+    }
+}
+
+impl std::fmt::Display for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        if self.spread() {
+            write!(f, "{}-{}", trim(self.lo), trim(self.hi))
+        } else {
+            write!(f, "{}", trim(self.lo))
+        }
+    }
+}
+
+/// A number as a person would write it: no trailing zeroes on a round one.
+fn trim(v: f64) -> String {
+    let s = format!("{:.2}", v);
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    s.to_string()
+}
 
 /// How the run was asked for on the command line.
 pub struct Options {
     pub random_colour: bool,
-    pub base_colour: u8,
+    pub base_colour: Span,
     /// True only when -c was actually given, in which case it wins over the
     /// colours a kind would otherwise come in.
     pub colour_given: bool,
@@ -15,14 +102,14 @@ pub struct Options {
     /// -w wants white eyes, so everything else gets out of their way.
     pub dark: bool,
     /// His height in rows, or None for a seventh of the screen.
-    pub size: Option<f64>,
+    pub size: Option<Span>,
     /// Every one exactly that size, with no variation between them.
     pub uniform: bool,
     /// How many rows of the shell he collides with.
     pub solid: usize,
     pub shell_mode: bool,
     pub frames: usize,
-    pub start_count: Option<usize>,
+    pub start_count: Option<Span>,
     pub commands: Vec<String>,
 }
 
@@ -30,7 +117,7 @@ impl Default for Options {
     fn default() -> Options {
         Options {
             random_colour: false,
-            base_colour: 84,
+            base_colour: Span::at(84.0),
             colour_given: false,
             eye_colour: 232,
             dark: false,
@@ -64,7 +151,10 @@ pub struct App {
     pub note: String,
     /// The kind being placed by hand, how many go down per click, and how big
     /// they are if you asked for a size.
-    pub placing: Option<(&'static Spec, usize, Option<f64>)>,
+    /// What the brush is putting down, how many of them a click is worth, and
+    /// how big.  The last two are kept as they were written rather than as
+    /// numbers, so a spread is rolled again at every click.
+    pub placing: Option<(&'static Spec, Span, Option<Span>)>,
     /// The brush that takes things away again, and how wide it is in columns.
     pub erasing: Option<f64>,
     /// Where the brush last put something down, and how far it has to travel
@@ -133,7 +223,8 @@ impl App {
         if self.opts.random_colour {
             self.random_colour()
         } else {
-            self.dim(self.opts.base_colour)
+            let c = self.opts.base_colour.roll_whole(&mut self.world.rng);
+            self.dim(c.clamp(0, 255) as u8)
         }
     }
 
@@ -141,7 +232,8 @@ impl App {
     /// about the skob you start with, not the ones summoned afterwards.
     pub fn colour_for(&mut self, spec: &Spec) -> u8 {
         if self.opts.colour_given || spec.palette.is_empty() {
-            return self.dim(self.opts.base_colour);
+            let c = self.opts.base_colour.roll_whole(&mut self.world.rng);
+            return self.dim(c.clamp(0, 255) as u8);
         }
         let c = spec.palette[self.world.rng.below(spec.palette.len())];
         // A box is grey to begin with, and halving grey only makes coal of it.
@@ -157,15 +249,21 @@ impl App {
 
     /// A radius in half-cells.  --size is a height in text rows; without it he
     /// is a seventh of the screen.  No two are quite the same unless -u says so.
-    pub fn radius_for(&mut self, spec: &Spec, vary: bool, asked: Option<f64>) -> f64 {
+    pub fn radius_for(&mut self, spec: &Spec, vary: bool, asked: Option<Span>) -> f64 {
         if let Some(fixed) = spec.radius {
             return fixed;   // a grain is the size a grain is
         }
-        let mut r = match asked.or(self.opts.size) {
-            Some(rows) => rows * 2.0,
+        // Rolled here, one thing at a time, so `5-13` is thirty skobs of
+        // thirty sizes rather than thirty of one size picked once.
+        let wanted = asked.or(self.opts.size);
+        let mut r = match wanted {
+            Some(rows) => rows.roll(&mut self.world.rng) * 2.0,
             None => self.world.height as f64 / 7.0,
         };
-        if vary && !self.opts.uniform {
+        // A spread is already a spread; sizes only wander about on their own
+        // when they were not told where to be.
+        let asked_to_wander = !wanted.map(|s| s.spread()).unwrap_or(false);
+        if vary && asked_to_wander && !self.opts.uniform {
             let jitter = (r / 5.0).max(1.0);
             r += self.world.rng.float() * 2.0 * jitter - jitter;
         }
@@ -185,7 +283,7 @@ impl App {
     }
 
     /// Drop some in at random, the way `summon` does.
-    pub fn summon(&mut self, kind: &str, count: usize, size: Option<f64>) {
+    pub fn summon(&mut self, kind: &str, count: usize, size: Option<Span>) {
         let spec = match kinds::lookup(kind) {
             Some(s) => s,
             None => {
@@ -225,10 +323,11 @@ impl App {
 
     /// A handful where you clicked, rather than wherever chance says.
     pub fn place_at(&mut self, px: f64, py: f64) {
-        let (spec, count, size) = match self.placing {
+        let (spec, how_many, size) = match self.placing {
             Some(p) => p,
             None => return,
         };
+        let count = how_many.roll_whole(&mut self.world.rng).max(1) as usize;
         let mut tied = 0usize;
         let mut put = 0usize;
         for _ in 0..count {
@@ -343,24 +442,31 @@ impl App {
         let arg3 = words.next().unwrap_or("");
 
         // `summon gorb 3 10` is three gorbs ten rows tall.  `summon 3` and
-        // `summon gorb` still mean what they always did.
-        let (kind, count, size) = match arg1.parse::<usize>() {
-            Ok(n) => ("skob".to_string(), n, arg2.parse::<f64>().ok()),
-            Err(_) if !arg1.is_empty() => (
+        // `summon gorb` still mean what they always did -- and any of those
+        // numbers may be a spread instead: `summon gorb 1-4 5-13`.
+        let (kind, how_many, size) = match Span::read(arg1) {
+            Some(n) => ("skob".to_string(), n, Span::read(arg2)),
+            None if !arg1.is_empty() => (
                 arg1.to_string(),
-                arg2.parse::<usize>().unwrap_or(1),
-                arg3.parse::<f64>().ok(),
+                Span::read(arg2).unwrap_or(Span::at(1.0)),
+                Span::read(arg3),
             ),
-            Err(_) => ("skob".to_string(), 1, None),
+            None => ("skob".to_string(), Span::at(1.0), None),
         };
-        let size = size.filter(|s| *s > 0.0 && *s < 1000.0);
+        let size = size.filter(|s| s.lo > 0.0 && s.hi < 1000.0);
+        // How many is settled the moment you ask for them; how big is not,
+        // because every one of them gets to be its own size.
+        let count = how_many.roll_whole(&mut self.world.rng).max(0) as usize;
+        let one = |span: Option<Span>, fallback: f64, rng: &mut Rng| -> f64 {
+            span.map(|s| s.roll(rng)).unwrap_or(fallback)
+        };
 
         match verb {
             "" => {}
             "summon" => self.summon(&kind, count, size),
             "place" => match kinds::lookup(&kind) {
                 Some(spec) => {
-                    self.placing = Some((spec, count.max(1), size));
+                    self.placing = Some((spec, how_many, size));
                     self.erasing = None;
                     self.note = match size {
                         Some(z) => format!("click to place {}, {} rows tall", spec.name, z),
@@ -371,7 +477,7 @@ impl App {
             },
             // `:erase` is `:place` backwards: a brush, as wide as you say.
             "erase" => {
-                let radius = arg1.parse::<f64>().unwrap_or(4.0).clamp(1.0, 200.0);
+                let radius = one(Span::read(arg1), 4.0, &mut self.world.rng).clamp(1.0, 200.0);
                 self.erasing = Some(radius);
                 self.placing = None;
                 self.note = format!("click to erase, {} across", radius * 2.0);
@@ -393,23 +499,32 @@ impl App {
             }
             "reset" => self.reset(),
             "gravity" => {
-                self.world.gravity = arg1.parse().unwrap_or(0.32);
+                self.world.gravity = one(Span::read(arg1), 0.32, &mut self.world.rng);
                 self.note = format!("gravity {}", self.world.gravity);
             }
             "stiffness" => {
-                self.world.stiffness = arg1.parse().unwrap_or(0.55);
+                self.world.stiffness = one(Span::read(arg1), 0.55, &mut self.world.rng);
                 self.note = format!("stiffness {}", self.world.stiffness);
             }
             "bounce" => {
-                self.world.bounce = arg1.parse().unwrap_or(0.45);
+                self.world.bounce = one(Span::read(arg1), 0.45, &mut self.world.rng);
                 self.note = format!("bounce {}", self.world.bounce);
             }
             "colour" | "color" => {
-                let c: u8 = arg1.parse().unwrap_or(self.opts.base_colour);
-                for b in &mut self.world.bodies {
-                    b.colour = c;
+                let asked = Span::read(arg1).unwrap_or(self.opts.base_colour);
+                // A spread here is rolled for each of them in turn, so
+                // `colour 20-200` is a room full of different things rather
+                // than a room full of one colour picked at random.
+                for i in 0..self.world.bodies.len() {
+                    let c = asked.roll_whole(&mut self.world.rng).clamp(0, 255) as u8;
+                    self.world.bodies[i].colour = c;
                 }
-                self.note = "recoloured".into();
+                self.opts.base_colour = asked;
+                self.note = if asked.spread() {
+                    format!("recoloured, {} apiece", asked)
+                } else {
+                    "recoloured".into()
+                };
             }
             "random" => {
                 self.opts.random_colour = true;
@@ -444,7 +559,7 @@ impl App {
                 self.run_command(&format!("colour {}", c));
             }
             "-z" | "--size" => {
-                self.opts.size = arg1.parse().ok();
+                self.opts.size = Span::read(arg1);
                 self.note = format!("size {}", arg1);
             }
             "-u" | "--uniform" => {
@@ -457,7 +572,8 @@ impl App {
                 .into();
             }
             "-s" | "--solid" => {
-                self.opts.solid = arg1.parse().unwrap_or(6).max(2);
+                self.opts.solid = one(Span::read(arg1), 6.0, &mut self.world.rng) as usize;
+                self.opts.solid = self.opts.solid.max(2);
                 self.note = format!("{} solid rows", self.opts.solid);
             }
             "-w" | "--white-eyes" => {
@@ -478,7 +594,11 @@ impl App {
 
     /// The colour of the first thing alive, which the prompt borrows.
     pub fn accent(&self) -> u8 {
-        self.world.bodies.first().map(|b| b.colour).unwrap_or(self.opts.base_colour)
+        self.world
+            .bodies
+            .first()
+            .map(|b| b.colour)
+            .unwrap_or(self.opts.base_colour.lo.clamp(0.0, 255.0) as u8)
     }
 
     /// How many things there are, and whether they are all plain skobs.

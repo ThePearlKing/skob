@@ -11,7 +11,7 @@ mod shell;
 mod term;
 mod world;
 
-use app::{App, Mode2, Options};
+use app::{App, Mode2, Options, Span};
 use draw::{braille, Canvas};
 use shell::{strip_colour, Action, Shell};
 use std::time::{Duration, Instant};
@@ -77,6 +77,11 @@ pub const USAGE: &str = "\
    :q  :quit  :exit     leave
    a ; b ; c            several at once, in the order written:
                         :clear ; summon amoeba 3 ; gravity 0.1
+   n-m                  a dash is a spread, wherever a number goes -- in a
+                        command or in a flag.  :summon skob 1-4 5-13 is one
+                        to four of them, each its own size between five and
+                        thirteen rows, and it is rolled again every time it
+                        is used: :place gorb 1-3 2-6 rolls at every click.
 
  --shell
    The whole screen becomes a bash shell, scrolling upward the way a
@@ -108,6 +113,7 @@ fn main() {
     app.reset();
     if let Some(n) = app.opts.start_count {
         app.world.banish();
+        let n = n.roll_whole(&mut app.world.rng).max(1) as usize;
         app.summon("skob", n, None);
     }
     if app.opts.shell_mode {
@@ -600,14 +606,21 @@ fn parse_args() -> Option<Options> {
             "-h" | "--help" => return None,
             "-r" | "--random" => opts.random_colour = true,
             "-n" | "--count" | "--skobs" => {
-                opts.start_count = next(&mut i, &args).parse().ok()
+                opts.start_count = Span::read(&next(&mut i, &args))
             }
             "-c" | "--colour" | "--color" => {
-                opts.base_colour = next(&mut i, &args).parse().unwrap_or(84);
+                opts.base_colour = Span::read(&next(&mut i, &args)).unwrap_or(Span::at(84.0));
                 opts.colour_given = true;
             }
-            "-s" | "--solid" => opts.solid = next(&mut i, &args).parse().unwrap_or(6).max(2),
-            "-z" | "--size" => opts.size = next(&mut i, &args).parse().ok(),
+            // Settled here and now, both of these: there is no world yet to
+            // roll them in, and neither is asked for twice.
+            "-s" | "--solid" => {
+                opts.solid = Span::read(&next(&mut i, &args))
+                    .map(|s| s.roll_once() as usize)
+                    .unwrap_or(6)
+                    .max(2)
+            }
+            "-z" | "--size" => opts.size = Span::read(&next(&mut i, &args)),
             "-w" | "--white-eyes" => {
                 opts.eye_colour = 231;
                 opts.dark = true;
@@ -615,9 +628,13 @@ fn parse_args() -> Option<Options> {
             "-u" | "--uniform" | "--no-variation" => opts.uniform = true,
             "--shell" => opts.shell_mode = true,
             "--command" | "--cmd" => opts.commands.push(next(&mut i, &args)),
-            "--frames" => opts.frames = next(&mut i, &args).parse().unwrap_or(0),
+            "--frames" => {
+                opts.frames = Span::read(&next(&mut i, &args))
+                    .map(|s| s.roll_once() as usize)
+                    .unwrap_or(0)
+            }
             other if other.starts_with('-') && other[1..].chars().all(|c| c.is_ascii_digit()) => {
-                opts.start_count = other[1..].parse().ok()
+                opts.start_count = Span::read(&other[1..])
             }
             _ => {}
         }

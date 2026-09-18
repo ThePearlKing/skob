@@ -58,6 +58,24 @@ which is how it puts out a pseudopod and oozes off across the floor.  Where it
 leans wanders of its own accord and fades, and never repeats.  You can see the
 membrane, the nucleus and a vacuole or two through it.
 
+Anywhere skob takes a number it will take a spread instead, written with a
+dash, and rolls it afresh every time it is used rather than once when it is
+read:
+
+```
+:summon skob 1-4 5-13     one to four skobs, each its own size between five
+                          and thirteen rows -- a roll for how many, then a
+                          roll each for how big
+:place gorb 1-3 2-6       and again at every click
+:colour 20-200            every one of them a colour of its own
+:gravity 0.05-0.4         one roll, because the world has one gravity
+skob -n 2-9 -z 3-8        flags too
+```
+
+A size given as a spread is taken as read: the little wander in size that
+things otherwise come with is what a spread replaces, not something added on
+top of it.
+
 Commands can be strung together with `;`:
 `:clear ; summon amoeba 3 ; gravity 0.1` does all three, in that order.
 
