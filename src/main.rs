@@ -178,6 +178,7 @@ fn run(app: &mut App, term: &mut Term) {
         let mut top_text = rows;
         if let Some(sh) = &mut app.shell {
             sh.width = cols;
+            sh.rows = rows;
             if sh.job.is_some() {
                 sh.drain_job();
                 sh.reap_job();

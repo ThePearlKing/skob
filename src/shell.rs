@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::unix::io::{FromRawFd, RawFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -41,8 +42,6 @@ const NEEDS_TERMINAL: &[&str] = &[
     // things whose whole point is the screen
     "cmatrix", "asciiquarium", "pipes.sh", "pipes", "sl", "cbonsai", "unimatrix", "tty-clock",
     "nethack", "moon-buggy", "bastet", "ninvaders", "2048",
-    // and the fetchers, which draw themselves beside their own logo
-    "neofetch", "fastfetch", "screenfetch", "pfetch", "macchina", "hyfetch", "nitch", "ufetch",
 ];
 
 /// `tree /` can talk faster than any terminal can listen.  Hold at most this
@@ -112,6 +111,8 @@ pub struct Shell {
     pub accent: u8,
     /// How wide the screen is, so jobs can lay their output out to fit.
     pub width: usize,
+    /// How tall the screen it is talking into is, for the same reason.
+    pub rows: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -141,6 +142,7 @@ impl Shell {
             known: HashMap::new(),
             accent,
             width: 80,
+            rows: 24,
         }
     }
 
@@ -503,12 +505,30 @@ impl Shell {
             line,
             quote(&meta.display().to_string())
         );
+        // A job talks down a terminal of its own, not down a pipe.  This is a
+        // bash shell, and a program in a bash shell asks what it is talking to
+        // before it decides how to say anything: down a pipe `ls` drops its
+        // colours, `neofetch` gives up on its right-hand column, and anything
+        // that lays itself out in columns has nothing to lay itself out in.
+        // Given a terminal they all behave exactly as they would in any other
+        // one, and what they say still comes back here to be read.
+        //
+        // Its input is not a terminal, though -- a job is not being typed at,
+        // and anything that reads should get the end of the file at once
+        // rather than waiting all day for a person who is not there.
+        let pty = Pty::open(self.width.max(20) as u16, self.rows.max(4) as u16);
         let child = Command::new("bash")
             .arg("-c")
             .arg(&script)
             .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(match &pty {
+                Some(p) => p.writer(),
+                None => Stdio::piped(),
+            })
+            .stderr(match &pty {
+                Some(p) => p.writer(),
+                None => Stdio::piped(),
+            })
             .spawn();
         let mut child = match child {
             Ok(c) => c,
@@ -519,6 +539,27 @@ impl Shell {
             }
         };
         let output = Arc::new(Mutex::new(Vec::new()));
+        if let Some(p) = pty {
+            // The far end is the job's now.  Ours has to go, or the reader
+            // below would sit waiting on a terminal that can never end.
+            let mut master = p.take_reader();
+            let sink = Arc::clone(&output);
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                while let Ok(n) = master.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    if let Ok(mut buf) = sink.lock() {
+                        buf.extend_from_slice(&chunk[..n]);
+                        if buf.len() > MAX_HELD_BYTES {
+                            let over = buf.len() - MAX_HELD_BYTES;
+                            buf.drain(..over);
+                        }
+                    }
+                }
+            });
+        }
         if let Some(mut out) = child.stdout.take() {
             let sink = Arc::clone(&output);
             std::thread::spawn(move || {
@@ -873,13 +914,31 @@ pub fn as_text(s: &str) -> String {
                         }
                         body.push(c);
                     }
-                    // Colour, and only if that is really all it is.
-                    if ended == Some('m')
-                        && body.chars().all(|c| c.is_ascii_digit() || c == ';')
-                    {
-                        out.push_str("\x1b[");
-                        out.push_str(&body);
-                        out.push('m');
+                    let n = body.parse::<usize>().unwrap_or(1).min(1000);
+                    match ended {
+                        // Colour, and only if that is really all it is.
+                        Some('m') if body.chars().all(|c| c.is_ascii_digit() || c == ';') => {
+                            out.push_str("\x1b[");
+                            out.push_str(&body);
+                            out.push('m');
+                        }
+                        // Going right across a line that is not there yet is
+                        // how a great many programs indent -- the fetchers put
+                        // their whole right-hand column there.  On a screen
+                        // that is a cursor move; written down, it is spaces.
+                        Some('C') => {
+                            for _ in 0..n.max(1) {
+                                out.push(' ');
+                            }
+                        }
+                        // And going back over what it has just written is a
+                        // rubbing-out, the same as a backspace.
+                        Some('D') => {
+                            for _ in 0..n.max(1) {
+                                out.pop();
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 // A window title and the like, which runs to a bell or an ESC.
@@ -920,6 +979,78 @@ pub fn as_text(s: &str) -> String {
         }
     }
     out
+}
+
+/// A terminal of our own making, for a job to talk down.
+///
+/// The near end is read here; the far end is handed to the job as its output.
+/// Both are closed on the way out -- the far end as soon as the job has it,
+/// because a terminal with an end still open here never finishes.
+struct Pty {
+    near: RawFd,
+    far: RawFd,
+}
+
+impl Pty {
+    fn open(cols: u16, rows: u16) -> Option<Pty> {
+        unsafe {
+            let near = libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY);
+            if near < 0 {
+                return None;
+            }
+            if libc::grantpt(near) != 0 || libc::unlockpt(near) != 0 {
+                libc::close(near);
+                return None;
+            }
+            let name = libc::ptsname(near);
+            if name.is_null() {
+                libc::close(near);
+                return None;
+            }
+            let far = libc::open(name, libc::O_RDWR | libc::O_NOCTTY);
+            if far < 0 {
+                libc::close(near);
+                return None;
+            }
+            // As wide as the shell it is talking into, so that whatever lays
+            // itself out in columns has the right number of them.
+            let size = libc::winsize {
+                ws_row: rows,
+                ws_col: cols,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            libc::ioctl(near, libc::TIOCSWINSZ, &size);
+            Some(Pty { near, far })
+        }
+    }
+
+    /// The far end, for the job to write down.  Every call is its own copy,
+    /// because stdout and stderr are handed over separately.
+    fn writer(&self) -> Stdio {
+        unsafe { Stdio::from_raw_fd(libc::dup(self.far)) }
+    }
+
+    /// The near end, to read what the job says.  Takes the whole thing: the
+    /// far end is closed here and now, so that when the job is done with its
+    /// own copies the terminal ends and the reader stops.
+    fn take_reader(self) -> std::fs::File {
+        unsafe {
+            libc::close(self.far);
+            let near = self.near;
+            std::mem::forget(self);
+            std::fs::File::from_raw_fd(near)
+        }
+    }
+}
+
+impl Drop for Pty {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.near);
+            libc::close(self.far);
+        }
+    }
 }
 
 /// Make the terminal over to this process group, so that what is typed at it
