@@ -1643,9 +1643,14 @@ impl World {
         self.handful.len()
     }
 
-    /// Carry whatever is in hand to where the mouse is now.  Held grains are
-    /// out of the sandbox entirely while they are up: they do not fall, and
-    /// nothing swaps places with them.
+    /// Carry whatever is in hand to where the mouse is now.
+    ///
+    /// Held grains are out of the sandbox while they are up: they do not fall
+    /// and nothing swaps places with them.  What they are not is free to be
+    /// put down inside something else -- a grain that is already somewhere
+    /// keeps its place, so a handful carried at a pile stops at it rather than
+    /// sinking into it.  Each grain of the handful is asked separately, so an
+    /// edge of it can go where there is room while the rest waits.
     fn carry_handful(&mut self) {
         if self.handful.is_empty() {
             return;
@@ -1655,16 +1660,45 @@ impl World {
             (mx as i32 / CELL_W * CELL_W) as f64,
             (my as i32 / CELL_H * CELL_H) as f64,
         );
+
+        // Everywhere that is spoken for by something not in the hand.
+        let mut spoken_for: HashMap<(i32, i32), usize> = HashMap::new();
+        for (bi, b) in self.bodies.iter().enumerate() {
+            if !b.is_grain() || self.in_hand(bi) {
+                continue;
+            }
+            let (gw, gh) = b.spec.mode.grain_size();
+            for i in 0..gw {
+                for j in 0..gh {
+                    spoken_for.insert((b.x[0] as i32 + i, b.y[0] as i32 + j), bi);
+                }
+            }
+        }
+
         let held = std::mem::take(&mut self.handful);
         for &(id, dx, dy) in &held {
-            if let Some(bi) = self.index_of(id) {
-                let (gw, gh) = self.bodies[bi].spec.mode.grain_size();
-                let b = &mut self.bodies[bi];
-                b.x[0] = (left + dx).clamp(0.0, (self.width - gw) as f64);
-                b.y[0] = (top + dy).clamp(0.0, (self.height - gh) as f64);
-                b.ox[0] = b.x[0];
-                b.oy[0] = b.y[0];
+            let bi = match self.index_of(id) {
+                Some(bi) => bi,
+                None => continue,
+            };
+            let (gw, gh) = self.bodies[bi].spec.mode.grain_size();
+            let x = (left + dx).clamp(0.0, (self.width - gw) as f64);
+            let y = (top + dy).clamp(0.0, (self.height - gh) as f64);
+            let (col, row) = (x as i32, y as i32);
+            let blocked = (0..gw).any(|i| {
+                (0..gh).any(|j| {
+                    spoken_for.contains_key(&(col + i, row + j))
+                        || self.ground.is_solid((row + j) / CELL_H, (col + i) / CELL_W)
+                })
+            });
+            if blocked {
+                continue;   // it stays where it is until there is room
             }
+            let b = &mut self.bodies[bi];
+            b.x[0] = x;
+            b.y[0] = y;
+            b.ox[0] = b.x[0];
+            b.oy[0] = b.y[0];
         }
         self.handful = held;
         self.handful.retain(|&(id, _, _)| self.bodies.iter().any(|b| b.id == id));
