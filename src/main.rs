@@ -28,9 +28,8 @@ pub const USAGE: &str = "\
  A skob is a soft thing: a ring of point masses held together by springs,
  with spokes to its middle to keep it plump.  Verlet integrated -- a skob
  has no stored velocity, only the gap between where it is and where it
- just was.  There is an older version of this in bash, kept as skob.sh;
- this is the same thing, fast enough to keep a few thousand grains of
- sand in the air.
+ just was.  Fast enough to keep a few thousand grains of sand in the air
+ at once, and to let a skob swim in them.
 
  FLAGS
    -r, --random         start with random colours

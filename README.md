@@ -89,7 +89,3 @@ the prompt runs the commands above; the flags work there too.
 | `shell.rs`  | the embedded shell: editing, completion, history, jobs     |
 | `app.rs`    | the state, and the little language you talk to it with     |
 | `main.rs`   | flags, the frame loop, and what a keystroke means          |
-
-`skob.sh` is the original, written in bash and awk.  It does most of the same
-things and is a great deal slower at them: about 76ms a frame on 480 grains of
-sand, against 1ms a frame on four thousand here.
