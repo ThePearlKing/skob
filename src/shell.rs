@@ -142,9 +142,10 @@ impl Shell {
     /// A line of a job's output, keeping whatever colours it arrived with.
     fn print_output(&mut self, line: &str) {
         let line = line.trim_end_matches('\r');
-        if line.contains('\x1b') {
-            let plain = strip_colour(line);
-            self.print(&plain, line);
+        if line.contains('\x1b') || line.bytes().any(|b| b < 32 && b != b'\t') {
+            let shown = as_text(line);
+            let plain = strip_colour(&shown);
+            self.print(&plain, &shown);
         } else {
             self.print(line, line);
         }
@@ -774,6 +775,85 @@ fn quote(s: &str) -> String {
 }
 
 /// The same text with every escape sequence taken out of it.
+/// What a job said, as text and nothing but.
+///
+/// A job's output is something we print into a screen of our own; it is not a
+/// terminal handed over for it to drive.  A program that hides the cursor, or
+/// throws it up the screen to draw beside itself, or asks for the alternate
+/// buffer, would be doing all of that to *us* -- and it outlives the program,
+/// which is how one run of something like `cmatrix` leaves the cursor gone for
+/// good and the shell painted over.  So colour is kept, because a colour is
+/// only ever a colour, and every other sequence is dropped on the way in.
+///
+/// Anything that wants to drive a terminal properly should be on the list that
+/// gets given the real one.
+pub fn as_text(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    let mut body = String::new();
+                    let mut ended = None;
+                    for c in chars.by_ref() {
+                        // A control sequence runs until its final byte.
+                        if ('\x40'..='\x7e').contains(&c) {
+                            ended = Some(c);
+                            break;
+                        }
+                        body.push(c);
+                    }
+                    // Colour, and only if that is really all it is.
+                    if ended == Some('m')
+                        && body.chars().all(|c| c.is_ascii_digit() || c == ';')
+                    {
+                        out.push_str("\x1b[");
+                        out.push_str(&body);
+                        out.push('m');
+                    }
+                }
+                // A window title and the like, which runs to a bell or an ESC.
+                Some(']') => {
+                    chars.next();
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' {
+                            break;
+                        }
+                        if c == '\x1b' {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                // Everything else: keypad modes, saved cursors, and the
+                // character-set escapes, which carry a byte or two of their own
+                // before the one that ends them.
+                _ => {
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if !('\x20'..='\x2f').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+            },
+            // A return starts the line again -- a progress bar rewriting
+            // itself -- and with no cursor here to move, the last go at it is
+            // the one that counts.
+            '\r' => out.clear(),
+            '\x08' => {
+                out.pop();
+            }
+            '\t' => out.push('\t'),
+            c if (c as u32) < 32 || c as u32 == 127 => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn strip_colour(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();

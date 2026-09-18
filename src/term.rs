@@ -15,6 +15,7 @@ pub const ESC: char = '\x1b';
 /// Screen-on: alternate buffer, no wrap, mouse reporting in SGR form.
 const ENTER_ALT: &str = "\x1b[?1049h\x1b[?7l\x1b[?1003h\x1b[?1006h";
 const HIDE_CURSOR: &str = "\x1b[?25l";
+const SHOW_CURSOR: &str = "\x1b[?25h";
 /// Screen-off, in the opposite order.
 const LEAVE_ALT: &str = "\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l";
 
@@ -117,9 +118,10 @@ impl Term {
 
     pub fn enter_screen(&self, show_cursor: bool) {
         let mut out = String::from(ENTER_ALT);
-        if !show_cursor {
-            out.push_str(HIDE_CURSOR);
-        }
+        // Said outright either way.  Whoever had the terminal before us may
+        // have left the cursor hidden, and a shell you cannot see the cursor
+        // in is a shell that looks broken.
+        out.push_str(if show_cursor { SHOW_CURSOR } else { HIDE_CURSOR });
         print!("{}", out);
         let _ = std::io::stdout().flush();
     }
