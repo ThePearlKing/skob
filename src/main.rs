@@ -124,13 +124,23 @@ fn main() {
     app.note.clear();
 
     let mut term = Term::new();
+    // However badly this goes, the terminal is not left in raw mode with mouse
+    // reporting on: that is what leaves you typing `;38;36;1M` at your shell.
+    std::panic::set_hook(Box::new(|info| {
+        term::emergency_restore();
+        eprintln!("skob fell over: {}", info);
+    }));
     term.raw_mode();
     term.enter_screen(app.opts.shell_mode);
 
     run(&mut app, &mut term);
 
-    term.cooked_mode();
+    // Mouse reporting off, then a moment for anything already on its way, then
+    // throw that away before the shell we came from can read it as typing.
     term.leave_screen();
+    std::thread::sleep(Duration::from_millis(30));
+    term.drop_pending_input();
+    term.cooked_mode();
 }
 
 fn run(app: &mut App, term: &mut Term) {

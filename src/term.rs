@@ -22,17 +22,28 @@ const LEAVE_ALT: &str = "\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l";
 /// is no unwinding and no destructor, only this.
 static mut SAVED_TERMIOS: Option<libc::termios> = None;
 
-/// Put the terminal back and go, without allocating or unwinding.
-extern "C" fn restore_and_exit(_signal: libc::c_int) {
+/// Hand the terminal back exactly as it was found, allocating nothing and
+/// unwinding nothing, so it is safe from a signal handler or a panic alike.
+///
+/// The order matters.  Mouse reporting goes off first, so the terminal stops
+/// producing reports; then the input queue is thrown away, so any report it
+/// already sent cannot survive us and be typed into whatever shell we came
+/// from as `;38;36;1M`; only then does the old terminal state go back.
+pub fn emergency_restore() {
     unsafe {
+        let bye = b"\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l\x1b[0m";
+        libc::write(libc::STDOUT_FILENO, bye.as_ptr() as *const libc::c_void, bye.len());
+        libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
         let saved = std::ptr::addr_of!(SAVED_TERMIOS);
         if let Some(t) = *saved {
             libc::tcsetattr(libc::STDIN_FILENO, libc::TCSANOW, &t);
         }
-        let bye = b"\x1b[?1003l\x1b[?1006l\x1b[?7h\x1b[?25h\x1b[?1049l\x1b[0m";
-        libc::write(libc::STDOUT_FILENO, bye.as_ptr() as *const libc::c_void, bye.len());
-        libc::_exit(0);
     }
+}
+
+extern "C" fn restore_and_exit(_signal: libc::c_int) {
+    emergency_restore();
+    unsafe { libc::_exit(0) }
 }
 
 /// The terminal as we found it, so we can put it back exactly.
@@ -70,8 +81,20 @@ impl Term {
                 self.saved = Some(t);
                 let slot = std::ptr::addr_of_mut!(SAVED_TERMIOS);
                 *slot = Some(t);
-                // However we are told to go, the terminal is handed back first.
-                for signal in [libc::SIGTERM, libc::SIGHUP, libc::SIGINT, libc::SIGQUIT] {
+                // However we are told to go -- asked nicely, killed, or having
+                // fallen over -- the terminal is handed back before we leave.
+                for signal in [
+                    libc::SIGTERM,
+                    libc::SIGHUP,
+                    libc::SIGINT,
+                    libc::SIGQUIT,
+                    libc::SIGABRT,
+                    libc::SIGSEGV,
+                    libc::SIGBUS,
+                    libc::SIGILL,
+                    libc::SIGFPE,
+                    libc::SIGPIPE,
+                ] {
                     libc::signal(signal, restore_and_exit as *const () as libc::sighandler_t);
                 }
             }
@@ -93,6 +116,13 @@ impl Term {
             }
         }
         self.raw = false;
+    }
+
+    /// Throw away anything the terminal has sent and we have not read.
+    pub fn drop_pending_input(&self) {
+        unsafe {
+            libc::tcflush(libc::STDIN_FILENO, libc::TCIFLUSH);
+        }
     }
 
     pub fn enter_screen(&self, show_cursor: bool) {
