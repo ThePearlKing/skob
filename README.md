@@ -79,7 +79,12 @@ top of it.
 Commands can be strung together with `;`:
 `:clear ; summon amoeba 3 ; gravity 0.1` does all three, in that order.
 
-Drag anything by any part of it with the mouse.  `;` or `:` opens the command
+Drag anything by any part of it with the mouse, sand and water included: a
+fine grain is a single braille dot, and since nobody can pick one dot out of a
+cell with a fingertip, the whole cell comes up -- all eight of them if that is
+what is in there, keeping the arrangement they had.  A coarse grain is a cell
+to itself already and comes up on its own.  What is in your hand does not fall
+until you let go of it, and a wall block cannot be picked up at all.  `;` or `:` opens the command
 line, vim style; space pauses, `g` kills gravity, `s` and `h` soften and harden,
 `r` starts over, `q` leaves.
 

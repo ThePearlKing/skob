@@ -190,6 +190,10 @@ pub struct World {
     pub ground: Ground,
     /// Which point the mouse has hold of, if any.
     pub grab: Option<(usize, usize)>,
+    /// Grains in the hand, by their own id, each with where it sat in the cell
+    /// it was lifted out of -- so a handful keeps its shape while it is
+    /// carried, and picking it up does not shuffle it.
+    pub handful: Vec<(usize, f64, f64)>,
     pub mouse: (f64, f64),
     pub rng: Rng,
     next_id: usize,
@@ -217,6 +221,7 @@ impl World {
             paused: false,
             ground: Ground::empty(),
             grab: None,
+            handful: Vec::new(),
             mouse: (-1.0, -1.0),
             rng: Rng::new(),
             next_id: 0,
@@ -413,6 +418,7 @@ impl World {
             self.sweep_solid(i);
             self.solve(i);
         }
+        self.carry_handful();
         self.tighten_strings();
         self.separate();
         self.bump_walls();
@@ -1402,14 +1408,20 @@ impl World {
 
         let mut taken: HashMap<(i32, i32), usize> = HashMap::with_capacity(grains.len() * 4);
         for &g in &order {
-            self.snap_grain(g);
+            // What is in the hand keeps its place in the world -- everything
+            // else has to go round it -- but it is not snapped to the grid and
+            // it does not fall while it is up there.
+            if !self.in_hand(g) {
+                self.snap_grain(g);
+            }
             self.mark_grain(&mut taken, g, true);
         }
 
         for &g in &order {
-            // A wall is a grain that has nothing to say about any of this.  It
-            // keeps its place in `taken`, so everything else has to go round it.
-            if self.bodies[g].spec.fixed {
+            // A wall is a grain that has nothing to say about any of this, and
+            // nor is one that has been picked up.  Both keep their place in
+            // `taken`, so everything else has to go round them.
+            if self.bodies[g].spec.fixed || self.in_hand(g) {
                 continue;
             }
             let (gw, gh) = self.bodies[g].spec.mode.grain_size();
@@ -1605,6 +1617,65 @@ impl World {
     /// The whole of a thing is handle, not just its outline: anywhere inside it
     /// takes hold of the nearest piece of skin, because a click in the middle of
     /// a skob plainly means that skob.
+    /// Take hold of whatever grains are under this point.
+    ///
+    /// A fine grain is one braille dot, and nobody can pick a single dot out
+    /// of a cell with a fingertip -- so the whole cell comes up, all eight
+    /// dots of it if that is what is in there.  A coarse one is a cell to
+    /// itself already and comes up on its own.
+    pub fn grab_grains(&mut self, x: f64, y: f64) -> usize {
+        let (row, col) = (y as i32 / CELL_H, x as i32 / CELL_W);
+        let (left, top) = ((col * CELL_W) as f64, (row * CELL_H) as f64);
+        self.handful.clear();
+        for b in &self.bodies {
+            if !b.is_grain() || b.spec.fixed {
+                continue;
+            }
+            let (gw, gh) = b.spec.mode.grain_size();
+            // Whichever cell it is in, or -- for one that fills a cell -- the
+            // cell it fills.
+            let here = (b.x[0] as i32 / CELL_W == col && b.y[0] as i32 / CELL_H == row)
+                || (b.x[0] <= x && x < b.x[0] + gw as f64 && b.y[0] <= y && y < b.y[0] + gh as f64);
+            if here {
+                self.handful.push((b.id, b.x[0] - left, b.y[0] - top));
+            }
+        }
+        self.handful.len()
+    }
+
+    /// Carry whatever is in hand to where the mouse is now.  Held grains are
+    /// out of the sandbox entirely while they are up: they do not fall, and
+    /// nothing swaps places with them.
+    fn carry_handful(&mut self) {
+        if self.handful.is_empty() {
+            return;
+        }
+        let (mx, my) = self.mouse;
+        let (left, top) = (
+            (mx as i32 / CELL_W * CELL_W) as f64,
+            (my as i32 / CELL_H * CELL_H) as f64,
+        );
+        let held = std::mem::take(&mut self.handful);
+        for &(id, dx, dy) in &held {
+            if let Some(bi) = self.index_of(id) {
+                let (gw, gh) = self.bodies[bi].spec.mode.grain_size();
+                let b = &mut self.bodies[bi];
+                b.x[0] = (left + dx).clamp(0.0, (self.width - gw) as f64);
+                b.y[0] = (top + dy).clamp(0.0, (self.height - gh) as f64);
+                b.ox[0] = b.x[0];
+                b.oy[0] = b.y[0];
+            }
+        }
+        self.handful = held;
+        self.handful.retain(|&(id, _, _)| self.bodies.iter().any(|b| b.id == id));
+    }
+
+    /// Is this grain in the hand?
+    fn in_hand(&self, bi: usize) -> bool {
+        let id = self.bodies[bi].id;
+        self.handful.iter().any(|&(held, _, _)| held == id)
+    }
+
     pub fn nearest_skin(&self, x: f64, y: f64) -> Option<(usize, usize)> {
         let mut best: Option<(f64, usize, usize)> = None;
         for (bi, b) in self.bodies.iter().enumerate() {

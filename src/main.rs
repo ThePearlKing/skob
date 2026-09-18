@@ -44,7 +44,10 @@ pub const USAGE: &str = "\
        --frames <n>     run n frames and quit (for recording)
    -h, --help           this
 
- MOUSE  press and drag -> grab the skin of a thing and fling it
+ MOUSE  press and drag -> grab the skin of a thing and fling it, or pick
+        up sand and water and carry it about.  A fine grain is one braille
+        dot and comes up by the cellful -- all eight of them, keeping the
+        shape they had -- and a coarse one comes up on its own.
  KEYS   space pause · g gravity · b bouncier · s softer
         h harder · r reset · q quit
  ;  or  :   open the command line, vim style.  The colon opens the bar
@@ -362,12 +365,28 @@ fn handle_mouse(app: &mut App, (button, col, row, pressed): (u32, i32, i32, bool
         return;
     }
     if pressed && button == 0 {
-        app.world.grab = app.world.nearest_skin(px, py);
-        if app.world.grab.is_some() {
-            app.note = "held".into();
+        // Something soft actually under the pointer has it.  Failing that,
+        // whatever fine stuff is in the cell you clicked -- it is there, and
+        // you are pointing straight at it.  Failing that, the nearest skin
+        // within reach, which is how you get hold of a thing by clicking near
+        // enough to it.
+        let inside_something = app.world.body_at(px, py).is_some();
+        let grains = if inside_something { 0 } else { app.world.grab_grains(px, py) };
+        if grains > 0 {
+            app.note = if grains == 1 {
+                "a grain".into()
+            } else {
+                format!("a handful of {}", grains)
+            };
+        } else {
+            app.world.grab = app.world.nearest_skin(px, py);
+            if app.world.grab.is_some() {
+                app.note = "held".into();
+            }
         }
     } else if !pressed {
         app.world.grab = None;
+        app.world.handful.clear();
         // Let go and the brush forgets where it was, so the next click always
         // puts one down wherever you clicked.
         app.brush = None;
