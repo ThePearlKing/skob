@@ -91,13 +91,18 @@ line, vim style; space pauses, `g` kills gravity, `s` and `h` soften and harden,
 ## The shell
 
 `--shell` turns the screen into a bash shell that scrolls the way a terminal
-does.  Anything that draws its own screen -- an editor, a pager, `htop`,
-`cmatrix`, or one of the fetch tools that prints beside its own logo -- is
-handed the real terminal for as long as it runs, and you are back among the
-skobs the moment it exits.  Everything else runs as a job
-whose output is read as text: colour is kept, and anything it says that would
-have moved the cursor or taken the screen is dropped, because that would have
-been done to the shell rather than by it.  In the bottom rows (`-s`, six by default) the text itself is the ground:
+does.  It is a bash shell with skobs in it, not something that behaves like
+one: anything that draws its own screen -- an editor, a pager, `htop`,
+`cmatrix` -- is handed the real terminal for as long as it runs, and you are
+back among the skobs the moment it exits.  Everything else runs as a job, down
+a terminal of its own.  That last part matters: a program asks what it is
+talking to before it decides how to say anything, so down a pipe `ls` drops its
+colours and anything that lays itself out in columns has no idea how many it
+has got.  Given a terminal they behave as they would in any other one, and what
+they say comes back into the scrollback -- `neofetch` lands there whole, logo
+down the left and the machine down the right.  Colour is kept; what a job says
+that would have moved the cursor or taken the screen is not, since that would
+have been done to the shell rather than by it.  In the bottom rows (`-s`, six by default) the text itself is the ground:
 things land on the letters and fall through the gaps between the words.  Above
 that they are ghosts, and any text they are standing on is redrawn in their own
 colour.  Sand is solid to a skob, a whole cell at a time.
