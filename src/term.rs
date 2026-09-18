@@ -131,6 +131,12 @@ impl Term {
         let _ = std::io::stdout().flush();
     }
 
+    /// True once stdin has ended and no key will ever arrive again, so that
+    /// nothing sits waiting for one that cannot come.
+    pub fn at_eof(&self) -> bool {
+        self.spent.get()
+    }
+
     /// Wait up to `timeout` for one byte of input.
     ///
     /// Asked for, one byte at a time, on the same thread that draws -- never

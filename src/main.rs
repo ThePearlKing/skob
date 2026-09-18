@@ -390,6 +390,11 @@ fn finish_shell_action(app: &mut App, term: &mut Term, action: Action) {
                 sh.run_foreground(&line);
             }
             term.raw_mode();
+            // Something like `neofetch` says its piece and is gone in an
+            // instant, and taking the screen straight back would be the same
+            // as never having run it.  So the last word stays up until there
+            // is a key to say it has been read.
+            wait_for_a_key(term);
             // Whatever it left behind in the input queue on its way out -- a
             // half-finished escape sequence, a mouse report -- is its own, not
             // ours, and would be typed into the world as gibberish.
@@ -397,6 +402,24 @@ fn finish_shell_action(app: &mut App, term: &mut Term, action: Action) {
             term.enter_screen(true);
         }
     }
+}
+
+/// Hold whatever is on the screen until a key says it has been seen.  There is
+/// a limit on the holding: a recording has nobody to press anything, and a
+/// terminal that has ended cannot be waited on at all.
+fn wait_for_a_key(term: &mut Term) {
+    if term.at_eof() {
+        return;
+    }
+    print!("\r\n\x1b[2m  -- any key --\x1b[0m");
+    let _ = std::io::Write::flush(&mut std::io::stdout());
+    let until = Instant::now() + Duration::from_secs(120);
+    while Instant::now() < until {
+        if term.key(Duration::from_millis(80)).is_some() || term.at_eof() {
+            break;
+        }
+    }
+    term.drop_pending_input();
 }
 
 // ------------------------------------------------------------------ drawing

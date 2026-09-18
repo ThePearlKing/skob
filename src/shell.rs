@@ -14,13 +14,34 @@ use std::sync::{Arc, Mutex};
 pub const ESC: &str = "\x1b";
 
 /// Commands that want the terminal itself: an editor, a pager, anything that
-/// draws its own screen.  These are run in the foreground with everything
-/// handed back to them.
+/// draws its own screen, and anything that prints by moving the cursor about
+/// rather than simply going along.  These are run in the foreground with
+/// everything handed back to them, because the alternative -- reading their
+/// output as though it were text -- makes nonsense of them.
 const NEEDS_TERMINAL: &[&str] = &[
-    "vi", "vim", "nvim", "nano", "emacs", "pico", "less", "more", "man", "top", "htop", "btop",
-    "atop", "watch", "ssh", "sudo", "su", "doas", "python", "python3", "ipython", "node", "irb",
-    "psql", "mysql", "sqlite3", "gdb", "lldb", "tmux", "screen", "fzf", "ranger", "mc", "nmtui",
-    "alsamixer", "crontab", "visudo",
+    // editors and pagers
+    "vi", "vim", "nvim", "nano", "emacs", "pico", "helix", "hx", "kak", "micro", "joe", "ed",
+    "less", "more", "most", "man", "info", "bat",
+    // watching the machine
+    "top", "htop", "btop", "btm", "atop", "bpytop", "bashtop", "gotop", "glances", "iotop",
+    "iftop", "nload", "bmon", "nvtop", "radeontop", "powertop", "s-tui", "watch", "dstat",
+    // getting about
+    "ranger", "nnn", "lf", "yazi", "vifm", "mc", "ncdu", "fzf", "tig", "lazygit", "lazydocker",
+    "k9s", "gdu", "duf",
+    // elsewhere, or as someone else
+    "ssh", "sudo", "su", "doas", "telnet", "mosh", "tmux", "screen", "zellij",
+    // prompts of their own
+    "python", "python3", "ipython", "node", "irb", "psql", "mysql", "sqlite3", "redis-cli",
+    "gdb", "lldb", "crontab", "visudo", "nmtui", "bluetuith", "alsamixer", "pulsemixer",
+    "dialog", "whiptail", "cfdisk", "fdisk", "parted", "wavemon",
+    // mail, chat, music, the web
+    "mutt", "neomutt", "alpine", "irssi", "weechat", "cmus", "ncmpcpp", "moc", "mocp", "cava",
+    "w3m", "lynx", "links", "elinks", "newsboat", "castero",
+    // things whose whole point is the screen
+    "cmatrix", "asciiquarium", "pipes.sh", "pipes", "sl", "cbonsai", "unimatrix", "tty-clock",
+    "nethack", "moon-buggy", "bastet", "ninvaders", "2048",
+    // and the fetchers, which draw themselves beside their own logo
+    "neofetch", "fastfetch", "screenfetch", "pfetch", "macchina", "hyfetch", "nitch", "ufetch",
 ];
 
 /// `tree /` can talk faster than any terminal can listen.  Hold at most this

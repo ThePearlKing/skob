@@ -68,7 +68,13 @@ line, vim style; space pauses, `g` kills gravity, `s` and `h` soften and harden,
 ## The shell
 
 `--shell` turns the screen into a bash shell that scrolls the way a terminal
-does.  In the bottom rows (`-s`, six by default) the text itself is the ground:
+does.  Anything that draws its own screen -- an editor, a pager, `htop`,
+`cmatrix`, or one of the fetch tools that prints beside its own logo -- is
+handed the real terminal for as long as it runs, and the screen is held until
+you press a key so you can read what it left.  Everything else runs as a job
+whose output is read as text: colour is kept, and anything it says that would
+have moved the cursor or taken the screen is dropped, because that would have
+been done to the shell rather than by it.  In the bottom rows (`-s`, six by default) the text itself is the ground:
 things land on the letters and fall through the gaps between the words.  Above
 that they are ghosts, and any text they are standing on is redrawn in their own
 colour.  Sand is solid to a skob, a whole cell at a time.
