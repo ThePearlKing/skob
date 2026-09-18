@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -629,6 +630,14 @@ impl Shell {
     }
 
     /// Run a command that wants the terminal, with everything handed to it.
+    ///
+    /// Handed over properly, which means a process group of its own and the
+    /// terminal made over to it.  Otherwise the command is in *our* group, and
+    /// a ^C typed at `cmatrix` is delivered to everything in that group at
+    /// once -- so quitting cmatrix quit skob as well, and dropped the person
+    /// back into the shell they started from.  While it holds the terminal we
+    /// are a background group and hear nothing of the keys, which is exactly
+    /// right: they are not ours to hear.
     pub fn run_foreground(&mut self, line: &str) {
         let meta = std::env::temp_dir().join(format!("rskob.{}.fg", std::process::id()));
         let script = format!(
@@ -637,7 +646,37 @@ impl Shell {
             line,
             quote(&meta.display().to_string())
         );
-        let _ = Command::new("bash").arg("-c").arg(&script).status();
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(&script);
+        unsafe {
+            command.pre_exec(|| {
+                // Its own group, before it is anything else.
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        let mut child = match command.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                self.note(&format!("bash: {}", e));
+                self.last_rc = 127;
+                return;
+            }
+        };
+        let pid = child.id() as libc::pid_t;
+        let ours = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+        unsafe {
+            // Said from both sides, because whichever of us gets there first
+            // wins and the other is told the same thing twice.
+            libc::setpgid(pid, pid);
+            if ours >= 0 {
+                hand_terminal_to(pid);
+            }
+        }
+        let ended = child.wait();
+        if ours >= 0 {
+            unsafe { hand_terminal_to(ours) };
+        }
         if let Ok(text) = std::fs::read_to_string(&meta) {
             let mut lines = text.lines();
             self.last_rc = lines.next().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
@@ -647,11 +686,13 @@ impl Shell {
                     self.cwd = dir;
                 }
             }
+        } else if let Some(signal) = ended.ok().and_then(|e| e.signal()) {
+            // It was cut short and never got as far as saying where it left
+            // us; the shell's way of putting that is 128 and the signal.
+            self.last_rc = 128 + signal;
         }
         let _ = std::fs::remove_file(&meta);
     }
-
-    // --------------------------------------------------------- highlighting
 
     fn kind_of(&mut self, word: &str) -> Kind {
         if let Some(k) = self.known.get(word) {
@@ -873,6 +914,16 @@ pub fn as_text(s: &str) -> String {
         }
     }
     out
+}
+
+/// Make the terminal over to this process group, so that what is typed at it
+/// goes there.  The handing over would stop us in our tracks -- a group that
+/// is not the foreground one touching the terminal is what SIGTTOU is for --
+/// so that is held off for exactly as long as it takes.
+unsafe fn hand_terminal_to(group: libc::pid_t) {
+    let was = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+    libc::tcsetpgrp(libc::STDIN_FILENO, group);
+    libc::signal(libc::SIGTTOU, was);
 }
 
 pub fn strip_colour(s: &str) -> String {
