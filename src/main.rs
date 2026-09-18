@@ -52,10 +52,12 @@ pub const USAGE: &str = "\
  THINGS   skob        a soft ball, the original
           gorb        an orange sphere, rigid and shining, no two alike
           box         four corners, no give at all, and it sinks
-          amoeba      so slack it barely keeps its shape
+          amoeba      a bag of fluid: holds its area, not its shape, and
+                      crawls about on pseudopods
           string      an open chain, a rope with no inside
           sand        one grain, and it piles the way sand does
           bigsand     a coarser grain, written #
+          wall        a block of stone that stays where you put it
           water       finds its own level, and can be swum in
           bigwater    a coarser drop, written ~
           balloon     small and vibrant; three of them lift a skob
@@ -64,14 +66,17 @@ pub const USAGE: &str = "\
  COMMANDS
    :summon <thing> [n] [size]  n of them, dropped in at random, that many
                                rows tall
-   :place  <thing> [n] [size]  then every click puts n where you clicked,
-                               until :stop
+   :place  <thing> [n] [size]  then draw with the mouse -- hold the button
+                               down and sweep -- until :stop.  Nothing is
+                               put down inside anything already there.
    :erase  [r]          then click or drag to rub things out, r columns across
                         (4 by default), until :stop
    :stop                stop placing or erasing
    :clear :reset        banish everything · back to one skob
    :gravity <x>  :stiffness <x>  :bounce <x>  :colour <n>  :random  :pause
    :q  :quit            leave
+   a ; b ; c            several at once, in the order written:
+                        :clear ; summon amoeba 3 ; gravity 0.1
 
  --shell
    The whole screen becomes a bash shell, scrolling upward the way a
@@ -342,14 +347,15 @@ fn handle_mouse(app: &mut App, (button, col, row, pressed): (u32, i32, i32, bool
         app.erase_at(px, py);
         return;
     }
+    // Placing is a brush too: hold the button down and draw with it.
+    if pressed && (button == 0 || button == 32) && app.placing.is_some() {
+        app.place_at(px, py);
+        return;
+    }
     if pressed && button == 0 {
-        if app.placing.is_some() {
-            app.place_at(px, py);
-        } else {
-            app.world.grab = app.world.nearest_skin(px, py);
-            if app.world.grab.is_some() {
-                app.note = "held".into();
-            }
+        app.world.grab = app.world.nearest_skin(px, py);
+        if app.world.grab.is_some() {
+            app.note = "held".into();
         }
     } else if !pressed {
         app.world.grab = None;

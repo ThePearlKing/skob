@@ -24,7 +24,7 @@ cargo build --release
 | `skob`       | a soft ball, the original                                  |
 | `gorb`       | a rigid orange sphere with a highlight, no two alike       |
 | `box`        | four corners, no give at all, and it sinks                 |
-| `amoeba`     | so slack it barely keeps its shape                         |
+| `amoeba`     | a bag of fluid: keeps its area, not its shape               |
 | `string`     | an open chain, a rope with no inside                       |
 | `sand`       | one grain, one braille dot, and it piles the way sand does |
 | `bigsand`    | a coarser grain, one cell, written `#`                     |
@@ -34,7 +34,9 @@ cargo build --release
 | `bigballoon` | perfectly round, and takes a skob away on its own          |
 
 `:summon <thing> [n] [size]` drops them in at random, that many rows tall.
-`:place <thing> [n] [size]` then puts them wherever you click, until `:stop`,
+`:place <thing> [n] [size]` then draws them with the mouse -- hold the button
+down and sweep, and nothing is put down inside anything already there, so you
+can lay a wall out a block at a time -- until `:stop`,
 and `:erase [r]` is the same brush backwards -- click or drag to rub things out,
 r columns across.  `:clear` takes away all of it at once.
 
@@ -45,6 +47,19 @@ makes a skob bouncy, three take it away, and one big one does it alone.
 Sand and water know about each other: water flows sideways until it is level,
 sand sinks through it, skobs float in it, and boxes are too dense to bother and
 go to the bottom.
+
+An amoeba is not a soft ball but a bag.  It holds the area inside it rather
+than any particular radius, and carries more skin than a circle of that area
+needs, so there is no shape for it to spring back to and nothing anywhere
+tells it what shape to be: what it looks like is only ever the sum of what has
+happened to it.  It puddles where it lands, keeps the dent you drag into it,
+and leans on its own skin from the inside, harder in some places than others,
+which is how it puts out a pseudopod and oozes off across the floor.  Where it
+leans wanders of its own accord and fades, and never repeats.  You can see the
+membrane, the nucleus and a vacuole or two through it.
+
+Commands can be strung together with `;`:
+`:clear ; summon amoeba 3 ; gravity 0.1` does all three, in that order.
 
 Drag anything by any part of it with the mouse.  `;` or `:` opens the command
 line, vim style; space pauses, `g` kills gravity, `s` and `h` soften and harden,

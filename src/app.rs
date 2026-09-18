@@ -217,6 +217,7 @@ impl App {
             None => return,
         };
         let mut tied = 0usize;
+        let mut put = 0usize;
         for _ in 0..count {
             let colour = self.colour_for(spec);
             let radius = self.radius_for(spec, true, size);
@@ -227,19 +228,30 @@ impl App {
             }
             x = x.clamp(1.0, self.world.width as f64 - 2.0);
             y = y.clamp(1.0, self.world.height as f64 - 2.0);
+            // You draw with this, holding the button down, so the same spot
+            // comes round again and again: nothing goes where something is.
+            if spec.mode.is_grain() {
+                if self.world.cell_taken(x, y) {
+                    continue;
+                }
+                self.world.take_cell(x, y);
+            } else if spec.buoyancy >= 0.0 && self.world.body_at(x, y).is_some() {
+                continue;
+            }
             // Put a balloon down on top of something and it is tied to it.
             let knot = if spec.buoyancy < 0.0 { self.world.body_at(px, py) } else { None };
             let id = self.world.spawn(spec, x, y, radius, colour);
+            put += 1;
             if let (Some(target), Some(i)) = (knot, self.world.index_of(id)) {
                 self.world.bodies[i].tether = Some(target);
                 tied += 1;
             }
         }
-        self.note = if tied > 0 {
-            format!("tied {} {} on", tied, kinds::plural(spec.name, tied))
-        } else {
-            format!("placed {} {}", count, kinds::plural(spec.name, count))
-        };
+        if tied > 0 {
+            self.note = format!("tied {} {} on", tied, kinds::plural(spec.name, tied));
+        } else if put > 0 {
+            self.note = format!("placed {} {}", put, kinds::plural(spec.name, put));
+        }
     }
 
     // ------------------------------------------------------- the commands
@@ -275,8 +287,29 @@ impl App {
         self.cmd_saved.clear();
     }
 
-    /// `summon gorb 3`, `gravity 0`, `place sand 20`, and the rest of it.
+    /// One typed line, which may be several commands: `clear ; summon amoeba 3`
+    /// does both, in the order written, and stops early if one of them was
+    /// `quit`.
     pub fn run_command(&mut self, line: &str) {
+        for part in line.split(';') {
+            if part.trim().is_empty() {
+                continue;
+            }
+            let note = std::mem::take(&mut self.note);
+            self.run_one(part.trim());
+            // A command with nothing to say leaves the last thing said standing,
+            // so `clear ; summon amoeba` reads as the summon it ended on.
+            if self.note.is_empty() {
+                self.note = note;
+            }
+            if self.quit {
+                return;
+            }
+        }
+    }
+
+    /// `summon gorb 3`, `gravity 0`, `place sand 20`, and the rest of it.
+    fn run_one(&mut self, line: &str) {
         let mut words = line.split_whitespace();
         let verb = words.next().unwrap_or("");
         let arg1 = words.next().unwrap_or("");

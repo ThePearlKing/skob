@@ -57,6 +57,17 @@ const WATER_LIFT: f64 = 1.8;
 /// And how much the water slows it down while it is in there.
 const WATER_DRAG: f64 = 0.35;
 
+/// How much more skin a bag has than it needs to go round what is inside it.
+/// This one number is the whole difference between a ball and an amoeba: a
+/// circle is the most area a given length of skin can hold, so a bag carrying
+/// less than that can never be a circle, and every lopsided shape that holds
+/// the right area is as settled as every other.  It has nothing to spring
+/// back to.
+const MEMBRANE_SLACK: f64 = 0.30;
+/// How hard the area is held.  1.0 is all of it at once, which shudders; this
+/// is per pass, and there are six of them.
+const AREA_FIX: f64 = 0.45;
+
 /// What a grain finds when it looks at the spot it would like to move into.
 enum Spot {
     Free,
@@ -79,6 +90,11 @@ pub struct Body {
     pub oy: Vec<f64>,
     /// A balloon tied to something: the id of whatever it will carry off.
     pub tether: Option<usize>,
+    /// For a bag: how far out each bit of skin is being pushed just now, as a
+    /// fraction of the radius.  It is not a formula but a memory -- it wanders
+    /// where the last few hundred frames left it, which is why an amoeba has
+    /// no shape it goes back to.
+    pub flow: Vec<f64>,
 }
 
 impl Body {
@@ -176,6 +192,8 @@ pub struct World {
     water_cells: Vec<bool>,
     mask_cols: i32,
     mask_rows: i32,
+    /// Frames since the world began.  Only the things that flow care.
+    pub tick: u64,
 }
 
 impl World {
@@ -198,6 +216,7 @@ impl World {
             water_cells: Vec::new(),
             mask_cols: 0,
             mask_rows: 0,
+            tick: 0,
         }
     }
 
@@ -215,6 +234,7 @@ impl World {
             ox: Vec::new(),
             oy: Vec::new(),
             tether: None,
+            flow: vec![1.0; if spec.ooze > 0.0 { n } else { 0 }],
         };
         match spec.mode {
             Mode::Body => {
@@ -251,6 +271,26 @@ impl World {
     }
 
     /// The thing at this spot that a balloon could be tied to, if any.
+    /// Is the character cell this point falls in already spoken for -- by a
+    /// grain, a drop, a wall or the letters underneath?  What it is for is
+    /// drawing with the mouse held down, where the same cell comes round again
+    /// and again and nothing should be stacked inside anything else.
+    pub fn cell_taken(&self, x: f64, y: f64) -> bool {
+        let (row, col) = (y as i32 / CELL_H, x as i32 / CELL_W);
+        self.ground.is_solid(row, col)
+            || self.solid_grain_in_cell(row, col)
+            || self.water_in_cell(row, col)
+    }
+
+    /// Spoken for as of now, rather than as of the next frame, so that two
+    /// grains put down in the same sweep of the mouse cannot land in one cell.
+    pub fn take_cell(&mut self, x: f64, y: f64) {
+        let (row, col) = (y as i32 / CELL_H, x as i32 / CELL_W);
+        if row >= 0 && col >= 0 && row < self.mask_rows && col < self.mask_cols {
+            self.grain_cells[(row * self.mask_cols + col) as usize] = true;
+        }
+    }
+
     pub fn body_at(&self, x: f64, y: f64) -> Option<usize> {
         self.bodies
             .iter()
@@ -344,12 +384,21 @@ impl World {
         if self.paused {
             return;
         }
+        self.tick += 1;
         self.rebuild_grain_mask();
         let lift = self.tether_lift();
         let wet: Vec<f64> = (0..self.bodies.len()).map(|i| self.submersion(i)).collect();
         for i in 0..self.bodies.len() {
             if self.bodies[i].is_grain() {
                 continue;
+            }
+            // A bag leans on its own skin once a frame -- not once a pass, or
+            // it would spend the whole day churning and skidding about on the
+            // spot instead of getting anywhere.
+            if self.bodies[i].spec.ooze > 0.0 {
+                self.drift_flow(i);
+                let amount = self.bodies[i].rest * self.bodies[i].spec.ooze * 0.10;
+                self.push_out_skin(i, amount);
             }
             let up = lift.get(&self.bodies[i].id).copied().unwrap_or(0.0);
             self.integrate(i, up, wet[i]);
@@ -490,7 +539,8 @@ impl World {
         let (gx, gy) = self.mouse;
         // Water pushes back on what is in it, and slows it down while it is
         // there: a skob dropped in one sinks, slows, and comes back up to float.
-        let friction = self.friction * (1.0 - WATER_DRAG * wet);
+        let friction =
+            self.friction * (1.0 - WATER_DRAG * wet) * self.bodies[bi].spec.drag;
         let b = &mut self.bodies[bi];
         // A balloon has its own idea of which way down is.
         let gravity =
@@ -532,12 +582,13 @@ impl World {
         for _ in 0..SOLVER_PASSES {
             match self.bodies[bi].spec.mode {
                 Mode::Chain => self.solve_chain(bi),
+                _ if self.bodies[bi].spec.ooze > 0.0 => self.solve_blob(bi),
                 _ => self.solve_ring(bi),
             }
             self.hit_walls(bi, &mut struck_x, &mut struck_y);
             self.hit_letters(bi, &mut struck_x, &mut struck_y);
         }
-        let bounce = self.bounce;
+        let bounce = self.bounce * self.bodies[bi].spec.grip;
         let b = &mut self.bodies[bi];
         for i in 0..n {
             if struck_x[i] {
@@ -617,6 +668,235 @@ impl World {
                 off += std::f64::consts::TAU;
             }
             off = off.clamp(-limit, limit);
+            let r = ((b.x[i] - cx).powi(2) + (b.y[i] - cy).powi(2)).sqrt();
+            b.x[i] = cx + r * (nominal + off).cos();
+            b.y[i] = cy + r * (nominal + off).sin();
+        }
+    }
+
+    /// A bag of fluid with a slack skin, which is what an amoeba is.
+    ///
+    /// Nothing here says what shape it should be.  The skin keeps its own
+    /// length, the inside keeps its own area, and because there is more skin
+    /// than a circle of that area needs, every shape it can fold itself into
+    /// holds just as well as any other -- so its shape is only ever the sum of
+    /// what has happened to it: where it landed, where you dragged it, and
+    /// where it last pushed itself out.  The middle point is not a hub any of
+    /// this hangs from; it only rides along at the centre of the crowd so the
+    /// face has somewhere to be.
+    fn solve_blob(&mut self, bi: usize) {
+        let spec = self.bodies[bi].spec;
+        let n = spec.points;
+        let mid = n;
+        let rest = self.bodies[bi].rest;
+
+        // The skin: it holds its length, and that is the only length it holds.
+        let skin = rest * 2.0 * (std::f64::consts::PI / n as f64).sin();
+        for i in 0..n {
+            self.spring(bi, i, (i + 1) % n, skin, spec.stiffness);
+        }
+
+        // The inside: as much of it as there always was, however it is folded.
+        let target = std::f64::consts::PI * rest * rest * (1.0 - MEMBRANE_SLACK);
+        self.hold_area(bi, target);
+
+        // The face rides in the middle of whatever shape it has ended up.
+        let centre = self.centroid(bi);
+        let b = &mut self.bodies[bi];
+        b.x[mid] = centre.0;
+        b.y[mid] = centre.1;
+
+        // A generous shell, there only so that nothing can run away with it.
+        let lo = rest * spec.shell_min;
+        let hi = rest * spec.shell_max;
+        for i in 0..n {
+            let (px, py) = (b.x[i] - centre.0, b.y[i] - centre.1);
+            let d = (px * px + py * py).sqrt();
+            if d > 1e-6 && (d < lo || d > hi) {
+                let r = d.clamp(lo, hi);
+                b.x[i] = centre.0 + px / d * r;
+                b.y[i] = centre.1 + py / d * r;
+            }
+        }
+
+        // Points keep their order round the skin, loosely -- a bag may fold,
+        // but it may not turn itself inside out.
+        self.keep_order(bi, centre);
+    }
+
+    /// Where the skin is, on average.
+    fn centroid(&self, bi: usize) -> (f64, f64) {
+        let b = &self.bodies[bi];
+        let n = b.spec.points;
+        let (mut x, mut y) = (0.0, 0.0);
+        for i in 0..n {
+            x += b.x[i];
+            y += b.y[i];
+        }
+        (x / n as f64, y / n as f64)
+    }
+
+    /// The way out, for the point between these two neighbours, and how much
+    /// of the skin is leaning that way.  It is the direction that changes the
+    /// area fastest, which is the only honest meaning of "out" for a bag.
+    fn out_of(b: &Body, i: usize, n: usize, sign: f64) -> (f64, f64) {
+        let (p, q) = ((i + n - 1) % n, (i + 1) % n);
+        (0.5 * (b.y[q] - b.y[p]) * sign, 0.5 * (b.x[p] - b.x[q]) * sign)
+    }
+
+    /// Which way round the skin is wound, as the sign of the area it encloses.
+    fn winding(b: &Body, n: usize) -> f64 {
+        let mut twice_area = 0.0;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            twice_area += b.x[i] * b.y[j] - b.x[j] * b.y[i];
+        }
+        if twice_area < 0.0 {
+            -1.0
+        } else {
+            1.0
+        }
+    }
+
+    /// Hold the area inside the ring, wherever the skin has got to: squeeze a
+    /// bag of water in one place and it comes out in another.  Every point is
+    /// moved from the one shape, not one after another, because the ways out
+    /// of a closed ring cancel exactly -- which is what stops the bag from
+    /// rowing itself across the screen.
+    fn hold_area(&mut self, bi: usize, target: f64) {
+        let n = self.bodies[bi].spec.points;
+        let held = self.grab.filter(|(g, _)| *g == bi).map(|(_, p)| p);
+        let b = &mut self.bodies[bi];
+        let sign = Self::winding(b, n);
+        let mut area = 0.0;
+        for i in 0..n {
+            let j = (i + 1) % n;
+            area += b.x[i] * b.y[j] - b.x[j] * b.y[i];
+        }
+        let error = target - (area * 0.5).abs();
+        let out: Vec<(f64, f64)> = (0..n).map(|i| Self::out_of(b, i, n, sign)).collect();
+        let weight: f64 = out.iter().map(|(x, y)| x * x + y * y).sum();
+        if weight < 1e-9 {
+            return;
+        }
+        let lambda = error / weight * AREA_FIX;
+        for i in 0..n {
+            if held == Some(i) {
+                continue;
+            }
+            b.x[i] += lambda * out[i].0;
+            b.y[i] += lambda * out[i].1;
+        }
+    }
+
+    /// Cytoplasm going somewhere: each bit of skin is leaned on from the
+    /// inside by however much `flow` says, along its own way out.
+    ///
+    /// The average lean is taken off first, so the bag can push itself into a
+    /// pseudopod but can never push itself along -- and the push moves where a
+    /// point was as well as where it is, so it changes the shape without
+    /// handing the thing any speed it did not earn.  Between them that is why
+    /// it oozes instead of flying about.
+    fn push_out_skin(&mut self, bi: usize, amount: f64) {
+        let n = self.bodies[bi].spec.points;
+        let held = self.grab.filter(|(g, _)| *g == bi).map(|(_, p)| p);
+        let b = &mut self.bodies[bi];
+        if b.flow.len() != n || amount <= 0.0 {
+            return;
+        }
+        let sign = Self::winding(b, n);
+        let mut step: Vec<(f64, f64)> = Vec::with_capacity(n);
+        for i in 0..n {
+            let (ox, oy) = Self::out_of(b, i, n, sign);
+            let len = (ox * ox + oy * oy).sqrt();
+            if len < 1e-6 {
+                step.push((0.0, 0.0));
+            } else {
+                step.push((ox / len * b.flow[i] * amount, oy / len * b.flow[i] * amount));
+            }
+        }
+        let mean = (
+            step.iter().map(|s| s.0).sum::<f64>() / n as f64,
+            step.iter().map(|s| s.1).sum::<f64>() / n as f64,
+        );
+        for i in 0..n {
+            if held == Some(i) {
+                continue;
+            }
+            let (dx, dy) = (step[i].0 - mean.0, step[i].1 - mean.1);
+            b.x[i] += dx;
+            b.y[i] += dy;
+            b.ox[i] += dx;
+            b.oy[i] += dy;
+        }
+    }
+
+    /// The flow wandering on: now and then a bit of skin starts leaning out,
+    /// or stops; what each bit is doing bleeds into its neighbours; and all of
+    /// it fades.  There is no pattern underneath it and nothing it returns to,
+    /// which is the difference between a thing that is alive and a thing that
+    /// is being animated.
+    fn drift_flow(&mut self, bi: usize) {
+        let n = self.bodies[bi].spec.points;
+        if self.bodies[bi].flow.len() != n {
+            self.bodies[bi].flow = vec![0.0; n];
+        }
+        // A new pseudopod every second or so, somewhere, one way or the other.
+        if self.rng.below(100) < 4 {
+            let k = self.rng.below(n);
+            let strength = self.rng.float() * 2.0 - 0.8;
+            for d in -2i32..=2 {
+                let i = ((k as i32 + d).rem_euclid(n as i32)) as usize;
+                self.bodies[bi].flow[i] += strength * (1.0 - d.abs() as f64 / 3.0);
+            }
+        }
+        let was = self.bodies[bi].flow.clone();
+        let b = &mut self.bodies[bi];
+        let mut total = 0.0;
+        for i in 0..n {
+            let (p, q) = ((i + n - 1) % n, (i + 1) % n);
+            b.flow[i] = (was[i] * 0.90 + (was[p] + was[q]) * 0.05) * 0.995;
+            total += b.flow[i];
+        }
+        // Leaning out everywhere at once is not a pseudopod, only a bigger
+        // amoeba, and it is the area that decides how big it is.
+        let mean = total / n as f64;
+        for i in 0..n {
+            b.flow[i] = (b.flow[i] - mean).clamp(-1.6, 1.6);
+        }
+    }
+
+    /// Each point keeps to its own wedge of the ring, give or take, so the
+    /// skin can fold as deeply as it likes without ever crossing itself.
+    fn keep_order(&mut self, bi: usize, centre: (f64, f64)) {
+        let spec = self.bodies[bi].spec;
+        let n = spec.points;
+        let b = &mut self.bodies[bi];
+        let (cx, cy) = centre;
+        let mut sc = 0.0;
+        let mut ss = 0.0;
+        let mut angle = vec![0.0f64; n];
+        for i in 0..n {
+            angle[i] = (b.y[i] - cy).atan2(b.x[i] - cx);
+            let off = angle[i] - std::f64::consts::TAU * i as f64 / n as f64;
+            sc += off.cos();
+            ss += off.sin();
+        }
+        let turn = ss.atan2(sc);
+        let limit = std::f64::consts::PI / n as f64 * spec.twist;
+        for i in 0..n {
+            let nominal = std::f64::consts::TAU * i as f64 / n as f64 + turn;
+            let mut off = angle[i] - nominal;
+            while off > std::f64::consts::PI {
+                off -= std::f64::consts::TAU;
+            }
+            while off < -std::f64::consts::PI {
+                off += std::f64::consts::TAU;
+            }
+            if off.abs() <= limit {
+                continue;
+            }
+            let off = off.clamp(-limit, limit);
             let r = ((b.x[i] - cx).powi(2) + (b.y[i] - cy).powi(2)).sqrt();
             b.x[i] = cx + r * (nominal + off).cos();
             b.y[i] = cy + r * (nominal + off).sin();
@@ -851,6 +1131,11 @@ impl World {
         }
 
         for &g in &order {
+            // A wall is a grain that has nothing to say about any of this.  It
+            // keeps its place in `taken`, so everything else has to go round it.
+            if self.bodies[g].spec.fixed {
+                continue;
+            }
             let (gw, gh) = self.bodies[g].spec.mode.grain_size();
             self.mark_grain(&mut taken, g, false);
             let mut x = self.bodies[g].x[0] as i32;

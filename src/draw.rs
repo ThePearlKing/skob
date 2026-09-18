@@ -70,6 +70,9 @@ impl Canvas {
                         canvas.line(kx, ky, ax, ay, STRING_COLOUR);
                     }
                     let (top, bottom) = canvas.fill_ring(body, world);
+                    if body.spec.innards {
+                        canvas.innards(body, world.tick);
+                    }
                     if body.spec.shine {
                         canvas.glint(body);
                     }
@@ -129,6 +132,48 @@ impl Canvas {
         }
     }
 
+    /// What you can see through a skin that is not quite opaque: the membrane
+    /// itself, catching the light all the way round; a dark nucleus, which
+    /// keeps below the eyes because the eyes have the middle of the face; and
+    /// a couple of vacuoles going slowly round with everything else.
+    fn innards(&mut self, body: &crate::world::Body, tick: u64) {
+        let n = body.spec.points;
+        let (cx, cy) = body.centre();
+        let r = body.rest;
+        let rim = lighten(body.colour);
+        for i in 0..n {
+            let j = (i + 1) % n;
+            self.line(body.x[i], body.y[i], body.x[j], body.y[j], rim);
+        }
+        let t = tick as f64 * 0.017 + body.id as f64 * 1.9;
+        let (nx, ny) = (cx + r * 0.30 * t.cos(), cy + r * (0.40 + 0.10 * (t * 1.3).sin()));
+        self.innard(body, nx, ny, (r * 0.30).max(1.5), darken(body.colour));
+        for k in 0..2 {
+            let u = t * (0.8 + 0.4 * k as f64) + k as f64 * 2.3;
+            let vx = cx + r * 0.46 * u.cos();
+            let vy = cy + r * 0.46 * (u * 0.7 + 1.4).sin();
+            self.innard(body, vx, vy, (r * 0.15).max(1.0), rim);
+        }
+    }
+
+    /// One round thing inside the skin, and clipped to it: a body that flows
+    /// can pull its side in past wherever a vacuole had drifted to, and a
+    /// bubble left hanging outside it would give the whole game away.
+    fn innard(&mut self, body: &crate::world::Body, x: f64, y: f64, r: f64, colour: u8) {
+        let reach = r.ceil() as i32;
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                if (dx * dx + dy * dy) as f64 > r * r {
+                    continue;
+                }
+                let (px, py) = (x + dx as f64, y + dy as f64);
+                if inside(body, px, py) {
+                    self.dot(px as i32, py as i32, colour);
+                }
+            }
+        }
+    }
+
     fn line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, colour: u8) {
         let steps = ((x1 - x0).abs() + (y1 - y0).abs()).round().max(1.0) as i32;
         for s in 0..=steps {
@@ -173,6 +218,38 @@ impl Canvas {
             }
         }
         (top.max(0) / CELL_H, bottom.min(world.height - 1) / CELL_H)
+    }
+}
+
+/// Is this field pixel within the ring?  The usual crossing count, walked once
+/// round the skin.
+fn inside(body: &crate::world::Body, x: f64, y: f64) -> bool {
+    let n = body.spec.points;
+    let mut within = false;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        let (yi, yj) = (body.y[i], body.y[j]);
+        if (yi > y) != (yj > y)
+            && x < body.x[i] + (y - yi) / (yj - yi) * (body.x[j] - body.x[i])
+        {
+            within = !within;
+        }
+    }
+    within
+}
+
+/// And the same colour a few steps deeper, for whatever is meant to read as
+/// being under the surface rather than on it.
+pub fn darken(c: u8) -> u8 {
+    match c {
+        16..=231 => {
+            let (r, g, b) = ((c - 16) / 36, ((c - 16) % 36) / 6, (c - 16) % 6);
+            16 + r.saturating_sub(2) * 36 + g.saturating_sub(2) * 6 + b.saturating_sub(2)
+        }
+        232..=237 => 232,
+        238..=255 => c - 6,
+        8..=15 => c - 8,
+        _ => c,
     }
 }
 
