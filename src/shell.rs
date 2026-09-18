@@ -49,6 +49,9 @@ const NEEDS_TERMINAL: &[&str] = &[
 /// ones in between would have scrolled past before you could read them.
 const MAX_HELD_BYTES: usize = 256 * 1024;
 const MAX_LINES_PER_FRAME: usize = 200;
+/// How long a job has to take an interruption gracefully before it is simply
+/// stopped.
+const STOP_GRACE: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// A pipe has neither colours nor a width, so hand the job both back before it
 /// starts: otherwise `ls` comes out grey and one file to a line.
@@ -88,6 +91,9 @@ pub struct Job {
     child: Child,
     output: Arc<Mutex<Vec<u8>>>,
     meta: PathBuf,
+    /// When the stop key was pressed, if it has been.  A job is given a moment
+    /// to take the hint before it is insisted upon.
+    asked_to_stop: Option<std::time::Instant>,
 }
 
 pub struct Shell {
@@ -517,9 +523,18 @@ impl Shell {
         // and anything that reads should get the end of the file at once
         // rather than waiting all day for a person who is not there.
         let pty = Pty::open(self.width.max(20) as u16, self.rows.max(4) as u16);
-        let child = Command::new("bash")
-            .arg("-c")
-            .arg(&script)
+        let mut command = Command::new("bash");
+        command.arg("-c").arg(&script);
+        unsafe {
+            // Its own process group, so that stopping it stops all of it.  A
+            // job is not the bash that started it -- it is whatever that bash
+            // went on to run, and there may be a good deal of it.
+            command.pre_exec(|| {
+                libc::setpgid(0, 0);
+                Ok(())
+            });
+        }
+        let child = command
             .stdin(Stdio::null())
             .stdout(match &pty {
                 Some(p) => p.writer(),
@@ -597,7 +612,7 @@ impl Shell {
             });
         }
         self.flooded = false;
-        self.job = Some(Job { child, output, meta });
+        self.job = Some(Job { child, output, meta, asked_to_stop: None });
     }
 
     /// Take whatever the job has said since last time, a line at a time.
@@ -638,6 +653,17 @@ impl Shell {
 
     /// True when the job has finished and been cleared away.
     pub fn reap_job(&mut self) -> bool {
+        // Asked to stop half a second ago and still here: it is not going to
+        // take the hint.
+        if let Some(job) = &mut self.job {
+            if job.asked_to_stop.map_or(false, |at| at.elapsed() > STOP_GRACE) {
+                job.asked_to_stop = None;
+                unsafe {
+                    libc::killpg(job.child.id() as libc::pid_t, libc::SIGKILL);
+                }
+                let _ = job.child.kill();
+            }
+        }
         let finished = match &mut self.job {
             Some(job) => matches!(job.child.try_wait(), Ok(Some(_))),
             None => return false,
@@ -669,9 +695,20 @@ impl Shell {
         true
     }
 
+    /// The stop key, on a job that is running.
+    ///
+    /// To the whole group, and as an interruption rather than a killing: a job
+    /// is not the bash that started it but everything that bash went on to
+    /// run, and killing the one leaves the other -- type `firefox`, press ^C,
+    /// and you would have had a firefox with no shell behind it and no way
+    /// left to stop it.  Anything that will not take an interruption is dealt
+    /// with more firmly a moment later, in `reap_job`.
     pub fn stop_job(&mut self) {
         if let Some(job) = &mut self.job {
-            let _ = job.child.kill();
+            unsafe {
+                libc::killpg(job.child.id() as libc::pid_t, libc::SIGINT);
+            }
+            job.asked_to_stop = Some(std::time::Instant::now());
         }
         self.last_rc = 130;
     }
